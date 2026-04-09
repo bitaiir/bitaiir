@@ -37,6 +37,9 @@ dependencies = [
 [[package]]
 name = "bitaiir-chain"
 version = "0.1.0"
+dependencies = [
+ "bitaiir-types",
+]
 
 [[package]]
 name = "bitaiir-cli"

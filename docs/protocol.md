@@ -165,7 +165,7 @@ Concretely, the halving schedule is:
 | 1   | 0 .. 50,000,000          | 100 AIIR         | 0 – 7.9       |
 | 2   | 50,000,000 .. 100,000,000  | 50 AIIR          | 7.9 – 15.9    |
 | 3   | 100,000,000 .. 150,000,000 | 25 AIIR          | 15.9 – 23.8   |
-| 4   | 150,000,000 .. 200,000,000 | 12 AIIR (rounded down from 12.5) | 23.8 – 31.7 |
+| 4   | 150,000,000 .. 200,000,000 | 12.5 AIIR        | 23.8 – 31.7   |
 | 5+  | 200,000,000 .. ∞           | **10 AIIR (floor)** | 31.7+     |
 
 From block `200,000,000` onward, the subsidy is exactly 10 AIIR per
@@ -173,10 +173,10 @@ block for the rest of the chain's existence.
 
 **Total supply at key milestones** (rounded):
 
-- End of Era 1: ~5.0 B AIIR mined
-- End of Era 2: ~7.5 B AIIR mined
-- End of Era 3: ~8.75 B AIIR mined
-- End of Era 4: ~9.35 B AIIR mined
+- End of Era 1: 5.000 B AIIR mined
+- End of Era 2: 7.500 B AIIR mined
+- End of Era 3: 8.750 B AIIR mined
+- End of Era 4: 9.375 B AIIR mined
 - Tail-emission steady state: ~**63 M AIIR added per year**
 
 **Inflation rate at steady state** (approximate):
@@ -208,11 +208,23 @@ emission:
 
 ### 3.4 Rounding
 
-Subsidy division is performed in **atomic units**, with integer
-truncation. When era 4 would pay 12.5 AIIR, the actual payout is
-`12_50_000_000 atomic units` rounded down to `12_50_000_000` which is
-still representable; only half-AIIR boundaries require rounding (down).
-This keeps arithmetic exact in `u64`.
+Halvings are performed as a right-shift on the **atomic-unit** value
+of the subsidy, not on the human-readable AIIR amount. Because one
+AIIR is 10^8 atomic units and that factor already contains eight
+factors of two, the four halvings from era 1 to era 4 land on exactly
+representable values with no rounding at all:
+
+```text
+era 1: 10_000_000_000 atoms   = 100   AIIR
+era 2:  5_000_000_000 atoms   =  50   AIIR
+era 3:  2_500_000_000 atoms   =  25   AIIR
+era 4:  1_250_000_000 atoms   =  12.5 AIIR
+```
+
+From era 5 onward the tail emission floor takes over at 10 AIIR per
+block before any right-shift would drop an odd atomic unit, so the
+entire subsidy schedule is exact in `u64`. In particular, era 4 pays
+exactly 12.5 AIIR, never a rounded-down 12.
 
 The tail-emission floor of 10 AIIR is chosen to be a round number
 rather than the exact geometric value, to keep the schedule easy to

@@ -9,3 +9,6 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The subsidy schedule returns `Amount` values, and later phases will
+# validate `Block` / `Transaction` from this type set.
+bitaiir-types = { workspace = true }

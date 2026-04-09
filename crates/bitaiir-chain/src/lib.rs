@@ -1,16 +1,52 @@
-//! Consensus, validation, and state for the BitAiir blockchain.
+//! Consensus, validation, state, and mining for the BitAiir
+//! blockchain.
 //!
-//! This crate is the heart of the protocol. It implements:
+//! This crate is the heart of the protocol. When fully implemented it
+//! will cover:
 //!
-//! - Block validation (header checks, proof-of-work, merkle root, timestamps).
+//! - Block validation (header checks, Proof of Aiir, merkle root,
+//!   timestamps, coinbase rules, transaction rules).
 //! - Transaction validation against the UTXO set.
-//! - The UTXO set itself, with apply/undo for reorgs.
-//! - The mempool: pending transactions waiting to be mined.
-//! - Difficulty adjustment.
-//! - Coinbase rewards and halving schedule.
+//! - The in-memory UTXO set, with apply/undo for reorgs.
+//! - The mempool of pending transactions.
+//! - Difficulty retargeting (`CompactTarget` adjustment every 144
+//!   blocks).
+//! - Coinbase rewards and the halving + tail-emission schedule.
 //! - Fork choice and chain reorganization.
+//! - Mining, both the full-node path (`bitaiird mine=1`) and a
+//!   standalone command.
 //!
-//! It depends on `bitaiir-types` for data definitions, `bitaiir-crypto` for
-//! hashing and signature verification, and `bitaiir-storage` for persistence.
+//! It depends on `bitaiir-types` for data definitions and (in a later
+//! phase) `bitaiir-crypto` for signature verification and hashing.
+//! Persistence is the responsibility of `bitaiir-storage` and is
+//! layered on top of this crate; nothing in `bitaiir-chain` touches
+//! disk directly.
+//!
+//! # Implementation phases
+//!
+//! Work is landing incrementally so each commit can be reviewed and
+//! tested on its own:
+//!
+//! - **Phase 1a** *(this commit)* — consensus math: the [`subsidy`]
+//!   schedule (halvings + tail emission) and the [`CompactTarget`]
+//!   encoding of block difficulty.
+//! - **Phase 1b** — in-memory state containers: `Chain`, `UtxoSet`,
+//!   `Mempool`, and their pure-function APIs.
+//! - **Phase 1c** — block and transaction validation, with a
+//!   temporary stub for the Proof-of-Aiir hash so the validation
+//!   path can be tested without waiting on the Argon2id step.
+//! - **Phase 1d** — mining: assemble blocks from the mempool, run
+//!   Proof of Aiir until a valid nonce is found, splice the winning
+//!   block into the chain.
+//! - **Phase 2** — swap the Proof-of-Aiir stub for the real
+//!   Argon2id-wrapped implementation.
+//! - **Phase 3** — enforce the tx-level anti-spam proof of work from
+//!   protocol §6.7 during transaction validation.
 
 #![forbid(unsafe_code)]
+
+pub mod subsidy;
+pub mod target;
+
+pub use subsidy::{BLOCKS_PER_HALVING, INITIAL_SUBSIDY, TAIL_EMISSION, subsidy};
+pub use target::CompactTarget;
