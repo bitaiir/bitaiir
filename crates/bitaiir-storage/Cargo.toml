@@ -1,0 +1,11 @@
+[package]
+name = "bitaiir-storage"
+description = "Persistent storage for BitAiir: blocks, headers, UTXO set, and chain state, backed by redb."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "bitaiir-chain"
+description = "Consensus rules, block and transaction validation, UTXO set, mempool, and proof-of-work for BitAiir."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]

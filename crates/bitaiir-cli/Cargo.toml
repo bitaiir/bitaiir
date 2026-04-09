@@ -1,0 +1,15 @@
+[package]
+name = "bitaiir-cli"
+description = "BitAiir command-line client (`bitaiir-cli`) — talks to a running daemon over JSON-RPC."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bitaiir-cli"
+path = "src/main.rs"
+
+[dependencies]

@@ -129,5 +129,15 @@ dmypy.json
 .pyre/
 
 # Pycharm IDE
-
 .idea/
+
+# VS Code
+.vscode/
+
+# Ruff
+.ruff_cache/
+
+# Rust
+/target/
+**/*.rs.bk
+*.pdb

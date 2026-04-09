@@ -1,0 +1,9 @@
+# Formatting rules for the BitAiir Rust workspace.
+# Only stable rustfmt options are used here so `cargo fmt` works on stable.
+edition = "2024"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true

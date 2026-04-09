@@ -1,0 +1,6 @@
+# Pin the Rust toolchain so every contributor (and CI) builds with the same
+# compiler version. Bump this deliberately when you want to upgrade.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy", "rust-src"]
+profile = "default"

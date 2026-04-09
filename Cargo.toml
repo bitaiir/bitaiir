@@ -1,0 +1,121 @@
+# BitAiir Core — Cargo workspace root.
+#
+# This workspace contains every Rust crate that makes up the BitAiir reference
+# node. Crates are deliberately small and focused so each one can be developed,
+# tested, and reasoned about in isolation. Higher-level crates depend on lower
+# level ones, never the other way around.
+#
+# Layered architecture (top depends on bottom):
+#
+#     bitaiir-daemon      bitaiir-cli         <- binaries
+#           |
+#       bitaiir-node                          <- daemon library
+#           |
+#     +-----+-----+-----+-----+
+#     |     |     |     |     |
+#   chain  net   rpc  storage                 <- subsystems
+#     |     |     |     |
+#     +--+--+--+--+--+--+
+#        |     |     |
+#      types crypto                           <- foundations
+#
+# Add a new crate by placing it under `crates/` and adding it to `members`
+# below. Shared package metadata lives in `[workspace.package]` so individual
+# crates can inherit with `version.workspace = true`, etc.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/bitaiir-crypto",
+    "crates/bitaiir-types",
+    "crates/bitaiir-storage",
+    "crates/bitaiir-chain",
+    "crates/bitaiir-net",
+    "crates/bitaiir-rpc",
+    "crates/bitaiir-node",
+    "crates/bitaiir-daemon",
+    "crates/bitaiir-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["The BitAiir Developers"]
+repository = "https://github.com/bitaiir/bitaiir"
+homepage = "https://github.com/bitaiir/bitaiir"
+readme = "README.md"
+
+# Centralized dependency versions. Individual crates declare what they actually
+# use with `dep-name.workspace = true`, but the version is pinned in one place
+# here. This keeps versions aligned across the workspace and makes upgrades a
+# single-line change.
+[workspace.dependencies]
+# --- Internal crates ---
+bitaiir-crypto = { path = "crates/bitaiir-crypto", version = "0.1.0" }
+bitaiir-types = { path = "crates/bitaiir-types", version = "0.1.0" }
+bitaiir-storage = { path = "crates/bitaiir-storage", version = "0.1.0" }
+bitaiir-chain = { path = "crates/bitaiir-chain", version = "0.1.0" }
+bitaiir-net = { path = "crates/bitaiir-net", version = "0.1.0" }
+bitaiir-rpc = { path = "crates/bitaiir-rpc", version = "0.1.0" }
+bitaiir-node = { path = "crates/bitaiir-node", version = "0.1.0" }
+
+# --- External crates ---
+# Crypto primitives. `secp256k1` is the official binding to libsecp256k1, the
+# same C library Bitcoin Core uses. The RustCrypto crates (sha2, ripemd, hmac)
+# are pure-Rust, audited, and constant-time where it matters.
+secp256k1 = { version = "0.30", features = ["recovery", "global-context"] }
+sha2 = "0.10"
+ripemd = "0.1"
+hmac = "0.12"
+bs58 = "0.5"
+base64 = "0.22"
+
+# Errors. `thiserror` is the standard for library error enums; `anyhow` is for
+# binaries where we don't care about the exact error type.
+thiserror = "2"
+anyhow = "1"
+
+# Test helpers used by integration tests across the workspace.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+# Binary serialization, used as the canonical encoding for transaction and
+# block hashes. `features = ["serde"]` enables the bincode::serde bridge so
+# types that already `#[derive(Serialize, Deserialize)]` work without a
+# second set of derives.
+bincode = { version = "2", features = ["serde"] }
+
+# --- Future external crates (uncomment when wiring them in) ---
+# Async runtime
+# tokio = { version = "1", features = ["full"] }
+#
+# Storage
+# redb = "2"
+#
+# RPC
+# jsonrpsee = { version = "0.24", features = ["server", "client", "macros"] }
+#
+# CLI / config
+# clap = { version = "4", features = ["derive"] }
+# toml = "0.8"
+#
+# Logging
+# tracing = "0.1"
+# tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Release profile: optimize hard, strip symbols, abort on panic for smaller
+# binaries. We override this for benchmarks if/when we add them.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# Dev profile: keep default (opt-level=0, debug=true) so iteration is fast.
+[profile.dev]
+opt-level = 0
+debug = true
