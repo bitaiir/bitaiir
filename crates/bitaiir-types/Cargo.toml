@@ -1,0 +1,29 @@
+[package]
+name = "bitaiir-types"
+description = "Core data types shared across the BitAiir workspace: Block, Transaction, Hash256, Address, Amount."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal: bitaiir-types computes hashes (txid, block_hash, merkle_root)
+# using the double SHA-256 primitive from bitaiir-crypto.
+bitaiir-crypto = { workspace = true }
+
+# Serialization. `serde` + `bincode` together give us the canonical binary
+# encoding used for hashing, while `serde` alone covers JSON output for the
+# RPC layer.
+serde = { workspace = true, features = ["derive"] }
+bincode = { workspace = true }
+
+# Hex for Display/FromStr on Hash256 and friends.
+hex = { workspace = true }
+
+# Errors.
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
