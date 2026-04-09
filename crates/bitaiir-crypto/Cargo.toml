@@ -1,0 +1,42 @@
+[package]
+name = "bitaiir-crypto"
+description = "Cryptographic primitives for BitAiir: SHA-256, RIPEMD-160, HMAC, secp256k1, ECDSA, addresses, WIF."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Hashing primitives. We use sha2 and ripemd from the RustCrypto project, plus
+# hmac for HMAC-SHA-256. All three are pure Rust, audited, and constant-time
+# where it matters for security.
+sha2 = { workspace = true }
+ripemd = { workspace = true }
+hmac = { workspace = true }
+
+# Base58 encoding. We deliberately use the alphabet/encoding from the `bs58`
+# crate but compute Base58Check checksums ourselves so the implementation
+# stays parallel to the Python reference and to BitAiir's specific framing.
+bs58 = { workspace = true }
+
+# secp256k1 elliptic curve operations. This is the official binding to
+# libsecp256k1, the same C library Bitcoin Core uses. `global-context` lets us
+# skip threading a context handle through the API; `recovery` enables ECDSA
+# public-key recovery used by the signed-message protocol.
+secp256k1 = { workspace = true }
+
+# Base64 for the signed-message wire format (Bitcoin convention).
+base64 = { workspace = true }
+
+# Errors.
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Test vectors are loaded from tests/vectors/crypto.json. We need serde for
+# deserializing the JSON and hex for decoding hex-encoded byte strings inside
+# the vector entries.
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+hex = { workspace = true }

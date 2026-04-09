@@ -1,0 +1,346 @@
+{
+  "version": 1,
+  "description": "BitAiir crypto test vectors generated from the Python reference implementation. Used by the bitaiir-crypto Rust crate to verify byte-for-byte parity. Regenerate with `uv run python -m bitaiir.tools.generate_vectors`.",
+  "hash": [
+    {
+      "input_hex": "",
+      "sha256_hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "double_sha256_hex": "5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456",
+      "ripemd160_hex": "9c1185a5c5e9fc54612808977ee8f548b2258d31",
+      "hash160_hex": "b472a266d0bd89c13706a4132ccfb16f7c3b9fcb"
+    },
+    {
+      "input_hex": "61",
+      "sha256_hex": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+      "double_sha256_hex": "bf5d3affb73efd2ec6c36ad3112dd933efed63c4e1cbffcfa88e2759c144f2d8",
+      "ripemd160_hex": "0bdc9d2d256b3ee9daae347be6f4dc835a467ffe",
+      "hash160_hex": "994355199e516ff76c4fa4aab39337b9d84cf12b"
+    },
+    {
+      "input_hex": "616263",
+      "sha256_hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "double_sha256_hex": "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358",
+      "ripemd160_hex": "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc",
+      "hash160_hex": "bb1be98c142444d7a56aa3981c3942a978e4dc33"
+    },
+    {
+      "input_hex": "00",
+      "sha256_hex": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "double_sha256_hex": "1406e05881e299367766d313e26c05564ec91bf721d31726bd6e46e60689539a",
+      "ripemd160_hex": "c81b94933420221a7ac004a90242d8b1d3e5070d",
+      "hash160_hex": "9f7fd096d37ed2c0e3f7f0cfc924beef4ffceb68"
+    },
+    {
+      "input_hex": "ffffffff",
+      "sha256_hex": "ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e",
+      "double_sha256_hex": "3bb13029ce7b1f559ef5e747fcac439f1455a2ec7c5f09b72290795e70665044",
+      "ripemd160_hex": "39958a6d0fb956bb2737fbf8119f5634577c1392",
+      "hash160_hex": "b4b582f5aa51069651cacccec0d5392cc5284bcc"
+    },
+    {
+      "input_hex": "00112233445566778899aabbccddeeff",
+      "sha256_hex": "a8faed6abbf35c12a4b26e40f6feb19d736d90045c83b9f9a31f638d323e6811",
+      "double_sha256_hex": "c2979480e810cb17436e22b34782a5b5246c091a0c2cb223aa00baa4dd6350cc",
+      "ripemd160_hex": "fb4428479ccba7c64b41ebe635f8d7808e7ed7b7",
+      "hash160_hex": "2c2ecde06cdc0d76a0c069dbd34f8bfa39f3f38f"
+    }
+  ],
+  "hmac_sha256": [
+    {
+      "key_hex": "",
+      "message_hex": "",
+      "hmac_sha256_hex": "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"
+    },
+    {
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "message_hex": "4869205468657265",
+      "hmac_sha256_hex": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    },
+    {
+      "key_hex": "4a656665",
+      "message_hex": "7768617420646f2079612077616e7420666f72206e6f7468696e673f",
+      "hmac_sha256_hex": "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    }
+  ],
+  "base58": [
+    {
+      "input_hex": "",
+      "base58": ""
+    },
+    {
+      "input_hex": "00",
+      "base58": "1"
+    },
+    {
+      "input_hex": "0000",
+      "base58": "11"
+    },
+    {
+      "input_hex": "000000",
+      "base58": "111"
+    },
+    {
+      "input_hex": "61",
+      "base58": "2g"
+    },
+    {
+      "input_hex": "626262",
+      "base58": "a3gV"
+    },
+    {
+      "input_hex": "636363",
+      "base58": "aPEr"
+    },
+    {
+      "input_hex": "73696d706c792061206c6f6e6720737472696e67",
+      "base58": "2cFupjhnEsSn59qHXstmK2ffpLv2"
+    },
+    {
+      "input_hex": "00eb15231dfceb60925886b67d065299925915aeb172c06647",
+      "base58": "1NS17iag9jJgTHD1VXjvLCEnZuQ3rJDE9L"
+    }
+  ],
+  "keys": [
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "public_key_compressed_hex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "public_key_uncompressed_hex": "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
+      "address_compressed": "aiir1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+      "address_uncompressed": "aiir1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnXacFLhTH",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWM8FifSA"
+    },
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "public_key_compressed_hex": "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "public_key_uncompressed_hex": "04c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee51ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a",
+      "address_compressed": "aiir1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP",
+      "address_uncompressed": "aiir1LagHJk2FyCV2VzrNHVqg3gYG4TSYwDV4m",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnY5T7Ndji",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWMBfhYhp"
+    },
+    {
+      "private_key_hex": "00000000000000000000000000000000000000000000000000000000000000ff",
+      "public_key_compressed_hex": "031b38903a43f7f114ed4500b4eac7083fdefece1cf29c63528d563446f972c180",
+      "public_key_uncompressed_hex": "041b38903a43f7f114ed4500b4eac7083fdefece1cf29c63528d563446f972c1804036edc931a60ae889353f77fd53de4a2708b26b6f5da72ad3394119daf408f9",
+      "address_compressed": "aiir1DF7Yr4GKWoCXZZZXoEczo9oiokwQe8Urz",
+      "address_uncompressed": "aiir14FEwXgmVL37WvqVAucoijV1piKyzSCxzc",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRpi4gDYd5A",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWqp64aCw"
+    },
+    {
+      "private_key_hex": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
+      "public_key_compressed_hex": "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "public_key_uncompressed_hex": "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798b7c52588d95c3b9aa25b0403f1eef75702e84bb7597aabe663b82f6f04ef2777",
+      "address_compressed": "aiir1GrLCmVQXoyJXaPJQdqssNqwxvha1eUo2E",
+      "address_uncompressed": "aiir1JPbzbsAx1HyaDQoLMapWGoqf9pD5uha5m",
+      "wif_compressed": "eirno9tPeCd4UxNt2Kej1P7rTYx4znc7rkk5yFvkhB3Rj3enELHE",
+      "wif_uncompressed": "9Ygpz8T9JVTkPCBrApGoDmtPzDgDEYdWCGoTxLhGnogX589tFzr"
+    },
+    {
+      "private_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "public_key_compressed_hex": "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "public_key_uncompressed_hex": "044f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa385b6b1b8ead809ca67454d9683fcf2ba03456d6fe2c4abe2b07f0fbdbb2f1c1",
+      "address_compressed": "aiir1Q1pE5vPGEEMqRcVRMbtBK842Y6Pzo6nK9",
+      "address_uncompressed": "aiir1MsHWS1BnwMc3tLE8G35UXsS58fKipzB7a",
+      "wif_compressed": "earLPwHRDFuCWLddWPHMjMSH2j3U6X6Hxe8nJH2PR7DEUGePKoGa",
+      "wif_uncompressed": "9WsbkiJKB2ZfrhFBzQdLCQfMQ3jFJ7N8vPTgiXNAA62sBKCsnAe"
+    },
+    {
+      "private_key_hex": "798e2a22999e8b1ab02c2940eb72fdd048fabacfe78081caf902fca84d82e24c",
+      "public_key_compressed_hex": "02e37b47412832bf63ca4bf4300e92e47ca1274b7f45acd467516044f8bff7e2f8",
+      "public_key_uncompressed_hex": "04e37b47412832bf63ca4bf4300e92e47ca1274b7f45acd467516044f8bff7e2f855cf590e3bcfdadfe28db84c3d988d2b2cfdfa31c69dc7d8e82be3245fb28bea",
+      "address_compressed": "aiir1CXHEMQLYqGjpb325owrgjb8BS7VwMSEt8",
+      "address_uncompressed": "aiir1CHYcVa4yM8Re2G28FoVPKvJc5EappDehw",
+      "wif_compressed": "eeMSujzhseM6uZc5Y3ziWGtyvwYVAgPPL5myZnVCy6ZUdHZZBERC",
+      "wif_uncompressed": "9Xfcn2avDP4CJoMdppMKvJec6ssdjyW64RC6ZoZDgSjFR77HWiF"
+    },
+    {
+      "private_key_hex": "c4bbcb1fbec99d65bf59d85c8cb62ee2db963f0fe106f483d9afa73bd4e39a8a",
+      "public_key_compressed_hex": "0378d430274f8c5ec1321338151e9f27f4c676a008bdf8638d07c0b6be9ab35c71",
+      "public_key_uncompressed_hex": "0478d430274f8c5ec1321338151e9f27f4c676a008bdf8638d07c0b6be9ab35c71a1518063243acd4dfe96b66e3f2ec8013c8e072cd09b3834a19f81f659cc3455",
+      "address_compressed": "aiir1C7zdTfnkzmr13HfA2vNm5SJYRK6nEKyq8",
+      "address_uncompressed": "aiir1JwSSubhmg6iPtRjtyqhUYYH7bZg3Lfy1T",
+      "wif_compressed": "egsaqW1kXGM8XdsCxwrENHd6sMUBzaxXKxq6Gujxjqn1u1EfA8ib",
+      "wif_uncompressed": "9YEj71EK1y3J7VHp7nWHAop9acT6fRTdKoBSfViTDsvhXq6QbBJ"
+    }
+  ],
+  "msg_magic": [
+    {
+      "message": "ECDSA is the most fun I have ever experienced",
+      "msg_magic_hex": "1842697441696972205369676e6564204d6573736167653a0a2d454344534120697320746865206d6f73742066756e20492068617665206576657220657870657269656e636564",
+      "double_sha256_of_magic_hex": "48595171fc0f8ac6130c9411fa41029f1576b9752eccf224cab0b72082a3ec27"
+    },
+    {
+      "message": "BitAiir genesis",
+      "msg_magic_hex": "1842697441696972205369676e6564204d6573736167653a0a0f426974416969722067656e65736973",
+      "double_sha256_of_magic_hex": "42d64ba6728fe73a99b1efa135766ed8bb0ae6f0a8e490eadd973396b79ff282"
+    },
+    {
+      "message": "",
+      "msg_magic_hex": "1842697441696972205369676e6564204d6573736167653a0a00",
+      "double_sha256_of_magic_hex": "84a3ef3d843fec94ee5346ed74fe42783ff2694d6f9519d934a3f18615fc0a34"
+    },
+    {
+      "message": "a",
+      "msg_magic_hex": "1842697441696972205369676e6564204d6573736167653a0a0161",
+      "double_sha256_of_magic_hex": "0ca83db55e873d368e759b3fb8a26e2add35f4c18c1f551e4cb6f0952260a2b3"
+    }
+  ],
+  "signatures": [
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "message": "ECDSA is the most fun I have ever experienced",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnXacFLhTH",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWM8FifSA",
+      "address_compressed": "aiir1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+      "address_uncompressed": "aiir1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm",
+      "signature_compressed_b64": "IJHixiT7HQkevNIYX86fNGkFohVa25KBg9LEM6Nh+aztJAdKdN2MGX+cKLia332TkdJlGGUFn5iq5e412Hg7svU=",
+      "signature_uncompressed_b64": "HJHixiT7HQkevNIYX86fNGkFohVa25KBg9LEM6Nh+aztJAdKdN2MGX+cKLia332TkdJlGGUFn5iq5e412Hg7svU="
+    },
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "message": "BitAiir genesis",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnXacFLhTH",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWM8FifSA",
+      "address_compressed": "aiir1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+      "address_uncompressed": "aiir1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm",
+      "signature_compressed_b64": "IGycP5nvjoYuNlZY8Hb8fEv22QxN5GV92f0V2q4yvaFCGJ2Qbru16NYJmUsKb2Q/hFEk/ixoo/3AIRkDxr0xf/g=",
+      "signature_uncompressed_b64": "HGycP5nvjoYuNlZY8Hb8fEv22QxN5GV92f0V2q4yvaFCGJ2Qbru16NYJmUsKb2Q/hFEk/ixoo/3AIRkDxr0xf/g="
+    },
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "message": "",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnXacFLhTH",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWM8FifSA",
+      "address_compressed": "aiir1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+      "address_uncompressed": "aiir1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm",
+      "signature_compressed_b64": "H29+C+BWyOo2TA3FNWitCxoaVxT6QISgTVpJwV0AXb3LcbydtvrdmWTVR5v6/0P7rdVAAdmu5TFHm7S6CaOZnBk=",
+      "signature_uncompressed_b64": "G29+C+BWyOo2TA3FNWitCxoaVxT6QISgTVpJwV0AXb3LcbydtvrdmWTVR5v6/0P7rdVAAdmu5TFHm7S6CaOZnBk="
+    },
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "message": "a",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnXacFLhTH",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWM8FifSA",
+      "address_compressed": "aiir1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+      "address_uncompressed": "aiir1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm",
+      "signature_compressed_b64": "H21vtDNUTkrk1FROx8I9oXIjuSpGRLepKnOpKvT6JX1PAkwxG03N2N2dpGFZ+FyJUhN1ijXkhtV9e7HRX97o2lg=",
+      "signature_uncompressed_b64": "G21vtDNUTkrk1FROx8I9oXIjuSpGRLepKnOpKvT6JX1PAkwxG03N2N2dpGFZ+FyJUhN1ijXkhtV9e7HRX97o2lg="
+    },
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "message": "ECDSA is the most fun I have ever experienced",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnY5T7Ndji",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWMBfhYhp",
+      "address_compressed": "aiir1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP",
+      "address_uncompressed": "aiir1LagHJk2FyCV2VzrNHVqg3gYG4TSYwDV4m",
+      "signature_compressed_b64": "H1WwsCjjPfTT6dGU9SmXTsYJJIB7Z0uYuUhXMRSeYGdxJ2i9tVCInk7An0U6EkIA3f9eKAJqaWWebxGzf4m4UCM=",
+      "signature_uncompressed_b64": "G1WwsCjjPfTT6dGU9SmXTsYJJIB7Z0uYuUhXMRSeYGdxJ2i9tVCInk7An0U6EkIA3f9eKAJqaWWebxGzf4m4UCM="
+    },
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "message": "BitAiir genesis",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnY5T7Ndji",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWMBfhYhp",
+      "address_compressed": "aiir1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP",
+      "address_uncompressed": "aiir1LagHJk2FyCV2VzrNHVqg3gYG4TSYwDV4m",
+      "signature_compressed_b64": "Hyk8qq3qwyrXbPp8JBriltQhxfhp6da1hGXsMhONeOGzAU8W3ctkH/dU9Kkj1M8Bq5AGmSTgwAojpkm8Ol8QQB0=",
+      "signature_uncompressed_b64": "Gyk8qq3qwyrXbPp8JBriltQhxfhp6da1hGXsMhONeOGzAU8W3ctkH/dU9Kkj1M8Bq5AGmSTgwAojpkm8Ol8QQB0="
+    },
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "message": "",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnY5T7Ndji",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWMBfhYhp",
+      "address_compressed": "aiir1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP",
+      "address_uncompressed": "aiir1LagHJk2FyCV2VzrNHVqg3gYG4TSYwDV4m",
+      "signature_compressed_b64": "HzZha42ECbIQarlf6ArMUzcxydSSAmw3qkWtN+GuYRCtI32X3gscF99TYS3doq+dDnauHKfmKx5qd34188BWK3w=",
+      "signature_uncompressed_b64": "GzZha42ECbIQarlf6ArMUzcxydSSAmw3qkWtN+GuYRCtI32X3gscF99TYS3doq+dDnauHKfmKx5qd34188BWK3w="
+    },
+    {
+      "private_key_hex": "0000000000000000000000000000000000000000000000000000000000000002",
+      "message": "a",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRnY5T7Ndji",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWMBfhYhp",
+      "address_compressed": "aiir1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP",
+      "address_uncompressed": "aiir1LagHJk2FyCV2VzrNHVqg3gYG4TSYwDV4m",
+      "signature_compressed_b64": "H58XKhR3tRHFPMq6WcZXbC6PlZU6u+Qljt2POxHlrM7HQy1yIxjjJaCqpCvTi+t6KiBeyFxv1ncjApYD4SJtaj8=",
+      "signature_uncompressed_b64": "G58XKhR3tRHFPMq6WcZXbC6PlZU6u+Qljt2POxHlrM7HQy1yIxjjJaCqpCvTi+t6KiBeyFxv1ncjApYD4SJtaj8="
+    },
+    {
+      "private_key_hex": "00000000000000000000000000000000000000000000000000000000000000ff",
+      "message": "ECDSA is the most fun I have ever experienced",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRpi4gDYd5A",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWqp64aCw",
+      "address_compressed": "aiir1DF7Yr4GKWoCXZZZXoEczo9oiokwQe8Urz",
+      "address_uncompressed": "aiir14FEwXgmVL37WvqVAucoijV1piKyzSCxzc",
+      "signature_compressed_b64": "IGnMv45RIiu0x5l/iCziajzsBmVmAm2sYklCLkKHyzR+GauzdqFuWfIwUd+gfv1bYb42XyJaiieSON5fOmydHBQ=",
+      "signature_uncompressed_b64": "HGnMv45RIiu0x5l/iCziajzsBmVmAm2sYklCLkKHyzR+GauzdqFuWfIwUd+gfv1bYb42XyJaiieSON5fOmydHBQ="
+    },
+    {
+      "private_key_hex": "00000000000000000000000000000000000000000000000000000000000000ff",
+      "message": "BitAiir genesis",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRpi4gDYd5A",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWqp64aCw",
+      "address_compressed": "aiir1DF7Yr4GKWoCXZZZXoEczo9oiokwQe8Urz",
+      "address_uncompressed": "aiir14FEwXgmVL37WvqVAucoijV1piKyzSCxzc",
+      "signature_compressed_b64": "IEnYOMvGWrY4++pwnohhILzzt3oWypjJ9kLYoVALdjdqa+N97e6WbjZpvO3Ri/zRMPcRnqndKCeuoPKeHit8Pq0=",
+      "signature_uncompressed_b64": "HEnYOMvGWrY4++pwnohhILzzt3oWypjJ9kLYoVALdjdqa+N97e6WbjZpvO3Ri/zRMPcRnqndKCeuoPKeHit8Pq0="
+    },
+    {
+      "private_key_hex": "00000000000000000000000000000000000000000000000000000000000000ff",
+      "message": "",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRpi4gDYd5A",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWqp64aCw",
+      "address_compressed": "aiir1DF7Yr4GKWoCXZZZXoEczo9oiokwQe8Urz",
+      "address_uncompressed": "aiir14FEwXgmVL37WvqVAucoijV1piKyzSCxzc",
+      "signature_compressed_b64": "IHUToOcHM1hsDAG5FZb1a7h2ph8Z0ri46LfboWzweFfwFXI5SeQfeNhSdq8MmUJeSb9pfHU7wKl5AQNu3rl6CA0=",
+      "signature_uncompressed_b64": "HHUToOcHM1hsDAG5FZb1a7h2ph8Z0ri46LfboWzweFfwFXI5SeQfeNhSdq8MmUJeSb9pfHU7wKl5AQNu3rl6CA0="
+    },
+    {
+      "private_key_hex": "00000000000000000000000000000000000000000000000000000000000000ff",
+      "message": "a",
+      "wif_compressed": "eaHADzXVU3hvWSN7UFFqDD2iDN2h3HseMDE78P13iYRpi4gDYd5A",
+      "wif_uncompressed": "9Wk5ou17T4nXFNc9GEeoGTHhbyRQ7s3QsLzLy3ihVShWqp64aCw",
+      "address_compressed": "aiir1DF7Yr4GKWoCXZZZXoEczo9oiokwQe8Urz",
+      "address_uncompressed": "aiir14FEwXgmVL37WvqVAucoijV1piKyzSCxzc",
+      "signature_compressed_b64": "INUKEUt+y/LNTI/nmx6LKc2CyYYmPqht29GszJOulwmIESR4o2qlKeuL4Z//vTjj9EkcWummKBe3E6Z/kQnmUzE=",
+      "signature_uncompressed_b64": "HNUKEUt+y/LNTI/nmx6LKc2CyYYmPqht29GszJOulwmIESR4o2qlKeuL4Z//vTjj9EkcWummKBe3E6Z/kQnmUzE="
+    }
+  ],
+  "verify_known": [
+    {
+      "address": "aiir1JzjaNRfrBVh6abfGzM8H7WSJmxvhoNhGR",
+      "message": "ECDSA is the most fun I have ever experienced",
+      "signature": "HxS3ZviRS/zIa26ohjnHnQ8MnUTBZ3PAQcQj0j5zFflzDpJ4/4tR21sX+sMFLB23qlU6NwOrD04NQqDvdvG35G0=",
+      "note": "Compressed P2PKH, expected to verify",
+      "expected_verified": true,
+      "recovered_public_key_hex": "037ddbf9316d29f92e73734fabc25ca425cd0f4970edc1e9748a7a4d182dbff6e2"
+    },
+    {
+      "address": "aiir1KBoKn8xzGgFnirpmqtfPRbeoE7WmGW1Wf",
+      "message": "ECDSA is the most fun I have ever experienced",
+      "signature": "GxS3ZviRS/zIa26ohjnHnQ8MnUTBZ3PAQcQj0j5zFflzDpJ4/4tR21sX+sMFLB23qlU6NwOrD04NQqDvdvG35G0=",
+      "note": "Uncompressed P2PKH, expected to verify",
+      "expected_verified": true,
+      "recovered_public_key_hex": "047ddbf9316d29f92e73734fabc25ca425cd0f4970edc1e9748a7a4d182dbff6e2e4e6e4673863bfa92b56a38cd42e6302282ff0acfdc5581d5ca6daafd839946f"
+    },
+    {
+      "address": "aiir175A5YsPUdM71mnNCC3i8faxxYJgBonjWL",
+      "message": "ECDSA is the most fun I have ever experienced",
+      "signature": "IBuc5GXSJCr6m7KevsBAoCiX8ToOjW2CDZMr6PCEbiHwQJ237LZTj/REbDHI1/yelY6uBWEWXiOWoGnajlgvO/A=",
+      "note": "Valid signature shape but recovers a different address",
+      "expected_verified": false,
+      "recovered_public_key_hex": "02f3e72bdeadb6180badc30cbcd5d56588ab4b15a0f8c298915b0e43300261f586"
+    },
+    {
+      "address": "aiir175A5YsPUdM71mnNCC3i8faxxYJgBonjWL",
+      "message": "ECDSA is the most fun I have ever experienced",
+      "signature": "HyiLDcQQ1p2bKmyqM0e5oIBQtKSZds4kJQ+VbZWpr0kYA6Qkam2MlUeTr+lm1teUGHuLapfa43Jj=",
+      "note": "Malformed signature, decode is shorter than 65 bytes",
+      "expected_verified": false,
+      "expected_error": "Signature must be 65 bytes long: Got 57"
+    }
+  ]
+}
