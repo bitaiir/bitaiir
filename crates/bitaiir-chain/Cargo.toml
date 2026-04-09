@@ -12,3 +12,6 @@ repository.workspace = true
 # The subsidy schedule returns `Amount` values, and later phases will
 # validate `Block` / `Transaction` from this type set.
 bitaiir-types = { workspace = true }
+
+# Errors exposed by chain/utxo/mempool operations.
+thiserror = { workspace = true }

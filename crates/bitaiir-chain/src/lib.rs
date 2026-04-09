@@ -45,8 +45,19 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chain;
+pub mod error;
+pub mod mempool;
 pub mod subsidy;
 pub mod target;
+pub mod utxo;
 
+#[cfg(test)]
+mod test_util;
+
+pub use chain::Chain;
+pub use error::{Error, Result};
+pub use mempool::Mempool;
 pub use subsidy::{BLOCKS_PER_HALVING, INITIAL_SUBSIDY, TAIL_EMISSION, subsidy};
 pub use target::CompactTarget;
+pub use utxo::UtxoSet;
