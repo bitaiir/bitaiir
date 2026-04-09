@@ -76,6 +76,8 @@ fn amount_display_formats_with_eight_decimals() {
 // --- Round-trip helpers -------------------------------------------------- //
 
 fn sample_transaction() -> Transaction {
+    // `pow_nonce` is intentionally non-zero so tests that care about
+    // whether sighash strips it can actually observe the difference.
     Transaction {
         version: 1,
         inputs: vec![TxIn {
@@ -98,6 +100,7 @@ fn sample_transaction() -> Transaction {
             },
         ],
         locktime: 0,
+        pow_nonce: 7,
     }
 }
 
@@ -191,7 +194,100 @@ fn coinbase_detection() {
         pubkey: vec![],
         sequence: u32::MAX,
     }];
+    // Per protocol §6.5 coinbase transactions carry pow_nonce = 0 and are
+    // exempt from the anti-spam rule. `is_coinbase()` itself only looks
+    // at the input shape, but a realistic coinbase builder would also
+    // zero out pow_nonce, so we reflect that here.
+    tx.pow_nonce = 0;
     assert!(tx.is_coinbase());
+}
+
+// --- Sighash ------------------------------------------------------------- //
+
+#[test]
+fn sighash_is_deterministic() {
+    let tx = sample_transaction();
+    assert_eq!(tx.sighash(), tx.sighash());
+}
+
+#[test]
+fn sighash_ignores_pow_nonce() {
+    // The sighash covers the "template" of a transaction; the anti-spam
+    // pow_nonce is mined after signing, so it must not influence the
+    // signing digest — otherwise mining the nonce would invalidate the
+    // signature, producing a chicken-and-egg loop.
+    let mut tx = sample_transaction();
+    let baseline = tx.sighash();
+
+    tx.pow_nonce = 0;
+    assert_eq!(tx.sighash(), baseline, "pow_nonce = 0 must match baseline");
+
+    tx.pow_nonce = u64::MAX;
+    assert_eq!(
+        tx.sighash(),
+        baseline,
+        "pow_nonce = MAX must match baseline",
+    );
+}
+
+#[test]
+fn sighash_ignores_signatures() {
+    let mut tx = sample_transaction();
+    let with_sig = tx.sighash();
+
+    // Clearing the signature and computing sighash again should give the
+    // same digest — the whole point of a sighash is "what would this
+    // transaction look like with no signatures yet?".
+    tx.inputs[0].signature.clear();
+    let without_sig = tx.sighash();
+    assert_eq!(with_sig, without_sig);
+
+    // A totally different signature should also not change the sighash.
+    tx.inputs[0].signature = vec![0xff; 64];
+    let foreign_sig = tx.sighash();
+    assert_eq!(with_sig, foreign_sig);
+}
+
+#[test]
+fn sighash_depends_on_pubkey() {
+    // Unlike signature and pow_nonce, the public key IS part of the
+    // sighash. Otherwise the signer could lie about which key they are
+    // claiming to control.
+    let tx = sample_transaction();
+    let baseline = tx.sighash();
+
+    let mut mutated = tx.clone();
+    mutated.inputs[0].pubkey[0] ^= 0x01;
+    assert_ne!(mutated.sighash(), baseline);
+}
+
+#[test]
+fn sighash_depends_on_outputs_and_locktime() {
+    let tx = sample_transaction();
+    let baseline = tx.sighash();
+
+    let mut mutated = tx.clone();
+    mutated.outputs[0].amount = Amount::from_atomic(99);
+    assert_ne!(mutated.sighash(), baseline);
+
+    let mut mutated = tx.clone();
+    mutated.locktime = 500_000;
+    assert_ne!(mutated.sighash(), baseline);
+}
+
+#[test]
+fn txid_depends_on_pow_nonce() {
+    // Cross-check the opposite property of sighash: although the
+    // sighash ignores pow_nonce, the txid must cover it — the txid is
+    // what identifies a transaction after it has been mined, and two
+    // transactions that differ only in pow_nonce are, by construction,
+    // distinct.
+    let tx = sample_transaction();
+    let baseline = tx.txid();
+
+    let mut mutated = tx.clone();
+    mutated.pow_nonce = tx.pow_nonce.wrapping_add(1);
+    assert_ne!(mutated.txid(), baseline);
 }
 
 // --- Merkle root --------------------------------------------------------- //
