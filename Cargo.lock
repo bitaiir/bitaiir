@@ -171,9 +171,11 @@ version = "0.1.0"
 dependencies = [
  "bitaiir-chain",
  "bitaiir-crypto",
+ "bitaiir-net",
  "bitaiir-rpc",
  "bitaiir-storage",
  "bitaiir-types",
+ "clap",
  "jsonrpsee",
  "tokio",
  "tracing",
@@ -183,6 +185,13 @@ dependencies = [
 [[package]]
 name = "bitaiir-net"
 version = "0.1.0"
+dependencies = [
+ "bitaiir-crypto",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "bitaiir-node"
@@ -194,11 +203,14 @@ version = "0.1.0"
 dependencies = [
  "bitaiir-chain",
  "bitaiir-crypto",
+ "bitaiir-net",
+ "bitaiir-storage",
  "bitaiir-types",
  "jsonrpsee",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

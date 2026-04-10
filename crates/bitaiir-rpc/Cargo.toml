@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 bitaiir-chain = { workspace = true }
 bitaiir-crypto = { workspace = true }
+bitaiir-net = { workspace = true }
 bitaiir-storage = { workspace = true }
 bitaiir-types = { workspace = true }
 jsonrpsee = { workspace = true }

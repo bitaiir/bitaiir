@@ -1,12 +1,25 @@
-//! Peer-to-peer networking layer for BitAiir.
+//! Peer-to-peer networking for BitAiir.
 //!
-//! This crate implements the BitAiir wire protocol from scratch, modeled on
-//! the Bitcoin Core P2P design: TCP transport, custom message framing with a
-//! 4-byte network magic, a `version` / `verack` handshake, and message types
-//! for gossiping inventories, fetching blocks and transactions, and keeping
-//! connections alive.
+//! This crate implements the BitAiir wire protocol from scratch,
+//! modeled on Bitcoin Core's P2P design: TCP transport, custom
+//! message framing with 4-byte network magic, a version/verack
+//! handshake, and (in later phases) message types for block/tx
+//! gossip and chain synchronization.
 //!
-//! No external P2P framework (libp2p, etc.) is used. The goal is to fully
-//! own the protocol so we can evolve it without fighting an abstraction.
+//! Phase P2P-1 (this commit) covers the foundation:
+//! - Wire protocol framing (magic, command, length, checksum)
+//! - Message types: version, verack, ping, pong
+//! - Peer connection with async read/write
+//! - Outbound and inbound handshake
 
 #![forbid(unsafe_code)]
+
+pub mod error;
+pub mod message;
+pub mod peer;
+pub mod protocol;
+
+pub use error::{Error, Result};
+pub use message::{NetMessage, VersionMessage};
+pub use peer::Peer;
+pub use protocol::MAGIC;

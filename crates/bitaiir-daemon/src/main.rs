@@ -21,17 +21,32 @@ use std::time::Instant;
 
 use bitaiir_chain::{Chain, Mempool, UtxoSet, create_test_genesis, subsidy, validate_block};
 use bitaiir_crypto::hash::hash160;
+use bitaiir_net::Peer;
 use bitaiir_rpc::{BitaiirApiServer, BitaiirRpcImpl, NodeState, SharedState, Wallet};
 use bitaiir_storage::Storage;
 use bitaiir_types::OutPoint;
+use clap::Parser;
 use jsonrpsee::server::ServerBuilder;
+use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 const GENESIS_MESSAGE: &str =
     "Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos";
-const RPC_ADDR: &str = "127.0.0.1:8443";
-const DATA_DIR: &str = "bitaiir_data";
+
+#[derive(Parser)]
+#[command(name = "bitaiird", about = "BitAiir Core daemon", version)]
+struct Args {
+    /// RPC server bind address.
+    #[arg(long, default_value = "127.0.0.1:8443")]
+    rpc_addr: String,
+    /// P2P listener bind address.
+    #[arg(long, default_value = "127.0.0.1:8444")]
+    p2p_addr: String,
+    /// Data directory for chain storage.
+    #[arg(long, default_value = "bitaiir_data")]
+    data_dir: String,
+}
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -49,6 +64,8 @@ fn short_hash(hex: &str) -> String {
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+
     tracing_subscriber::fmt()
         .with_target(false)
         .with_level(true)
@@ -58,13 +75,14 @@ async fn main() {
     println!("  BitAiir Core v0.1.0");
     println!("  Proof of Aiir (SHA-256d + Argon2id)");
     println!("  Target block time: 5s | Retarget every 20 blocks");
-    println!("  RPC server: http://{RPC_ADDR}");
-    println!("  Data dir:   {DATA_DIR}/");
+    println!("  RPC server: http://{}", args.rpc_addr);
+    println!("  P2P server: {}", args.p2p_addr);
+    println!("  Data dir:   {}/", args.data_dir);
     println!();
 
     // --- Open storage ---------------------------------------------------- //
 
-    let data_path = PathBuf::from(DATA_DIR);
+    let data_path = PathBuf::from(&args.data_dir);
     let storage = Arc::new(Storage::open(&data_path).expect("failed to open storage"));
 
     // --- Load or create chain -------------------------------------------- //
@@ -193,12 +211,56 @@ async fn main() {
     };
 
     let server = ServerBuilder::default()
-        .build(RPC_ADDR)
+        .build(&args.rpc_addr)
         .await
         .expect("failed to bind RPC server");
 
     let rpc_handle = server.start(rpc_impl.into_rpc());
-    info!("RPC server listening on http://{RPC_ADDR}");
+    info!("RPC server listening on http://{}", args.rpc_addr);
+
+    // --- Start P2P listener ---------------------------------------------- //
+
+    let p2p_state = state.clone();
+    let p2p_addr = args.p2p_addr.clone();
+    tokio::spawn(async move {
+        let listener = match TcpListener::bind(&p2p_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("failed to bind P2P listener on {p2p_addr}: {e}");
+                return;
+            }
+        };
+        info!("P2P listener on {p2p_addr}");
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    let state = p2p_state.clone();
+                    tokio::spawn(async move {
+                        let our_height = {
+                            let s = state.read().await;
+                            s.chain.height()
+                        };
+                        let mut peer = Peer::new(stream, addr);
+                        match peer.handshake_inbound(our_height).await {
+                            Ok(v) => {
+                                info!(
+                                    "inbound peer {} connected: agent={}, height={}",
+                                    addr, v.user_agent, v.best_height,
+                                );
+                            }
+                            Err(e) => {
+                                warn!("inbound handshake with {addr} failed: {e}");
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!("P2P accept error: {e}");
+                }
+            }
+        }
+    });
 
     // --- Mining in background thread ------------------------------------- //
 

@@ -157,6 +157,11 @@ pub trait BitaiirApi {
     #[method(name = "getmempoolinfo")]
     async fn get_mempool_info(&self) -> RpcResult<serde_json::Value>;
 
+    /// Connect to a peer at the given address (ip:port) and perform
+    /// the BitAiir handshake.
+    #[method(name = "addpeer")]
+    async fn add_peer(&self, addr: String) -> RpcResult<serde_json::Value>;
+
     #[method(name = "stop")]
     async fn stop(&self) -> RpcResult<String>;
 }
@@ -377,6 +382,42 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let state = self.state.read().await;
         Ok(serde_json::json!({
             "size": state.mempool.len(),
+        }))
+    }
+
+    async fn add_peer(&self, addr: String) -> RpcResult<serde_json::Value> {
+        use tokio::net::TcpStream;
+
+        let stream = TcpStream::connect(&addr).await.map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -10,
+                format!("failed to connect to {addr}: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let peer_addr = stream.peer_addr().unwrap_or_else(|_| addr.parse().unwrap());
+        let mut peer = bitaiir_net::Peer::new(stream, peer_addr);
+
+        let our_height = {
+            let state = self.state.read().await;
+            state.chain.height()
+        };
+
+        let their_version = peer.handshake_outbound(our_height).await.map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -11,
+                format!("handshake failed: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        Ok(serde_json::json!({
+            "peer": addr,
+            "user_agent": their_version.user_agent,
+            "height": their_version.best_height,
+            "protocol_version": their_version.protocol_version,
+            "status": "connected",
         }))
     }
 
