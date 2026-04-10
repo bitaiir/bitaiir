@@ -142,7 +142,7 @@ pub fn run_tui(
                         };
                         let filtered = filter_commands(prefix);
                         if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
-                            app.input = cmd.to_string();
+                            app.input = format!("/{cmd}");
                         }
                         app.autocomplete = false;
                         // Don't execute yet — let user add args or press Enter again.
@@ -217,7 +217,7 @@ pub fn run_tui(
                         };
                         let filtered = filter_commands(prefix);
                         if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
-                            app.input = cmd.to_string();
+                            app.input = format!("/{cmd}");
                         }
                         app.autocomplete = false;
                     }
@@ -355,7 +355,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
             let popup_area = ratatui::layout::Rect {
                 x: chunks[1].x,
                 y: chunks[1].y.saturating_sub(popup_height),
-                width: chunks[1].width.min(50),
+                width: chunks[1].width.min(55),
                 height: popup_height,
             };
 
