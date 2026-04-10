@@ -24,6 +24,22 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+/// Available slash commands with descriptions.
+const COMMANDS: &[(&str, &str)] = &[
+    ("getblockchaininfo", "Show chain status"),
+    ("getblock", "Show block at height"),
+    ("getnewaddress", "Generate a new address"),
+    ("getbalance", "Show address balance"),
+    ("sendtoaddress", "Send AIIR to address"),
+    ("getmempoolinfo", "Show mempool status"),
+    ("mine start", "Start mining"),
+    ("mine stop", "Stop mining"),
+    ("addpeer", "Connect to a peer"),
+    ("stop", "Stop the daemon"),
+    ("help", "Show all commands"),
+    ("exit", "Exit BitAiir"),
+];
+
 /// Application state for the TUI.
 struct App {
     /// All log lines (mining events, system messages, command output).
@@ -32,10 +48,14 @@ struct App {
     input: String,
     /// Command history for scrolling with up/down arrows.
     history: Vec<String>,
-    /// Current history index (-1 = typing new command).
+    /// Current history index.
     history_idx: Option<usize>,
     /// Whether to quit.
     should_quit: bool,
+    /// Autocomplete popup visible.
+    autocomplete: bool,
+    /// Selected index in the autocomplete popup.
+    autocomplete_idx: usize,
 }
 
 impl App {
@@ -43,19 +63,30 @@ impl App {
         Self {
             logs: vec![
                 String::new(),
-                "  Type 'help' for commands. Mining: 'mine start' / 'mine stop'".into(),
+                "  Type /command or 'help'. Mining: /mine start".into(),
                 String::new(),
             ],
             input: String::new(),
             history: Vec::new(),
             history_idx: None,
             should_quit: false,
+            autocomplete: false,
+            autocomplete_idx: 0,
         }
     }
 
     fn push_log(&mut self, line: String) {
         self.logs.push(line);
     }
+}
+
+/// Filter commands matching the typed prefix.
+fn filter_commands(prefix: &str) -> Vec<(&'static str, &'static str)> {
+    COMMANDS
+        .iter()
+        .filter(|(name, _)| prefix.is_empty() || name.starts_with(prefix))
+        .copied()
+        .collect()
 }
 
 /// Run the TUI. Blocks until the user exits.
@@ -102,10 +133,26 @@ pub fn run_tui(
                     continue;
                 }
                 match key.code {
+                    KeyCode::Enter if app.autocomplete => {
+                        // Accept the selected autocomplete entry.
+                        let prefix = if app.input.starts_with('/') {
+                            &app.input[1..]
+                        } else {
+                            &app.input
+                        };
+                        let filtered = filter_commands(prefix);
+                        if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
+                            app.input = cmd.to_string();
+                        }
+                        app.autocomplete = false;
+                        // Don't execute yet — let user add args or press Enter again.
+                    }
                     KeyCode::Enter => {
-                        let cmd = app.input.trim().to_string();
+                        // Strip leading "/" if present.
+                        let cmd = app.input.trim().trim_start_matches('/').to_string();
                         app.input.clear();
                         app.history_idx = None;
+                        app.autocomplete = false;
 
                         if cmd.is_empty() {
                             continue;
@@ -134,10 +181,61 @@ pub fn run_tui(
                             app.should_quit = true;
                         } else {
                             app.input.push(c);
+                            // Trigger autocomplete when "/" is the first character.
+                            if app.input == "/" {
+                                app.autocomplete = true;
+                                app.autocomplete_idx = 0;
+                            } else if app.autocomplete {
+                                // Update filter, reset selection.
+                                app.autocomplete_idx = 0;
+                            }
                         }
                     }
                     KeyCode::Backspace => {
                         app.input.pop();
+                        if app.input.is_empty() || !app.input.starts_with('/') {
+                            app.autocomplete = false;
+                        } else if app.autocomplete {
+                            app.autocomplete_idx = 0;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        if app.autocomplete {
+                            app.autocomplete = false;
+                            app.input.clear();
+                        } else {
+                            app.should_quit = true;
+                        }
+                        continue;
+                    }
+                    KeyCode::Tab if app.autocomplete => {
+                        // Tab also accepts the selection (like shell completion).
+                        let prefix = if app.input.starts_with('/') {
+                            &app.input[1..]
+                        } else {
+                            &app.input
+                        };
+                        let filtered = filter_commands(prefix);
+                        if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
+                            app.input = cmd.to_string();
+                        }
+                        app.autocomplete = false;
+                    }
+                    KeyCode::Up if app.autocomplete => {
+                        if app.autocomplete_idx > 0 {
+                            app.autocomplete_idx -= 1;
+                        }
+                    }
+                    KeyCode::Down if app.autocomplete => {
+                        let prefix = if app.input.starts_with('/') {
+                            &app.input[1..]
+                        } else {
+                            &app.input
+                        };
+                        let filtered = filter_commands(prefix);
+                        if app.autocomplete_idx + 1 < filtered.len() {
+                            app.autocomplete_idx += 1;
+                        }
                     }
                     KeyCode::Up => {
                         // Scroll through command history.
@@ -161,9 +259,6 @@ pub fn run_tui(
                                 app.input.clear();
                             }
                         }
-                    }
-                    KeyCode::Esc => {
-                        app.should_quit = true;
                     }
                     _ => {}
                 }
@@ -245,6 +340,55 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let cursor_x = chunks[1].x + 1 + "bitaiir> ".len() as u16 + app.input.len() as u16;
     let cursor_y = chunks[1].y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
+
+    // --- Autocomplete popup ---------------------------------------------- //
+    if app.autocomplete {
+        let prefix = if app.input.starts_with('/') {
+            &app.input[1..]
+        } else {
+            &app.input
+        };
+        let filtered = filter_commands(prefix);
+
+        if !filtered.is_empty() {
+            let popup_height = (filtered.len() as u16 + 2).min(14); // +2 for borders
+            let popup_area = ratatui::layout::Rect {
+                x: chunks[1].x,
+                y: chunks[1].y.saturating_sub(popup_height),
+                width: chunks[1].width.min(50),
+                height: popup_height,
+            };
+
+            let items: Vec<Line> = filtered
+                .iter()
+                .enumerate()
+                .map(|(i, (name, desc))| {
+                    let (fg, bg) = if i == app.autocomplete_idx {
+                        (Color::White, Color::DarkGray)
+                    } else {
+                        (Color::Gray, Color::Black)
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            format!(" /{:<22}", name),
+                            Style::default().fg(Color::Cyan).bg(bg),
+                        ),
+                        Span::styled(format!(" {desc:<20}"), Style::default().fg(fg).bg(bg)),
+                    ])
+                })
+                .collect();
+
+            let popup = Paragraph::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Commands ")
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            );
+
+            f.render_widget(ratatui::widgets::Clear, popup_area);
+            f.render_widget(popup, popup_area);
+        }
+    }
 }
 
 /// Dispatch a command string to the RPC server and return the output.
