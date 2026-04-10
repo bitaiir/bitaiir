@@ -15,3 +15,5 @@ name = "bitaiird"
 path = "src/main.rs"
 
 [dependencies]
+bitaiir-chain = { workspace = true }
+bitaiir-types = { workspace = true }
