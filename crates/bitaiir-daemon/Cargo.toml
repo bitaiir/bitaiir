@@ -16,4 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 bitaiir-chain = { workspace = true }
+bitaiir-rpc = { workspace = true }
 bitaiir-types = { workspace = true }
+jsonrpsee = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -92,23 +92,25 @@ argon2 = "0.5"
 # second set of derives.
 bincode = { version = "2", features = ["serde"] }
 
+# Async runtime.
+tokio = { version = "1", features = ["full"] }
+
+# JSON-RPC server and client.
+jsonrpsee = { version = "0.24", features = ["server", "http-client", "macros"] }
+
+# CLI argument parsing.
+clap = { version = "4", features = ["derive"] }
+
+# Structured logging.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # --- Future external crates (uncomment when wiring them in) ---
-# Async runtime
-# tokio = { version = "1", features = ["full"] }
-#
 # Storage
 # redb = "2"
 #
-# RPC
-# jsonrpsee = { version = "0.24", features = ["server", "client", "macros"] }
-#
-# CLI / config
-# clap = { version = "4", features = ["derive"] }
+# Config files
 # toml = "0.8"
-#
-# Logging
-# tracing = "0.1"
-# tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Release profile: optimize hard, strip symbols, abort on panic for smaller
 # binaries. We override this for benchmarks if/when we add them.
