@@ -102,6 +102,10 @@ jsonrpsee = { version = "0.24", features = ["server", "http-client", "macros"] }
 # CLI argument parsing.
 clap = { version = "4", features = ["derive"] }
 
+# Terminal UI.
+ratatui = "0.29"
+crossterm = "0.28"
+
 # Structured logging.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
