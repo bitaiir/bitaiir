@@ -21,6 +21,7 @@ bitaiir-net = { workspace = true }
 bitaiir-rpc = { workspace = true }
 bitaiir-storage = { workspace = true }
 clap = { workspace = true }
+serde_json = { workspace = true }
 bitaiir-types = { workspace = true }
 jsonrpsee = { workspace = true }
 tokio = { workspace = true }

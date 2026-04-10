@@ -50,6 +50,9 @@ struct Args {
     /// Disable mining (useful for a node that only syncs and serves RPC).
     #[arg(long, default_value_t = false)]
     no_mine: bool,
+    /// Interactive mode: show a command prompt instead of mining table.
+    #[arg(short, long, default_value_t = false)]
+    interactive: bool,
 }
 
 fn unix_now() -> u64 {
@@ -335,6 +338,7 @@ async fn main() {
     let mining_shutdown = shutdown.clone();
     let mining_recipient = miner_recipient_hash;
     let do_mine = !args.no_mine;
+    let interactive = args.interactive;
     let mining_storage = storage.clone();
 
     let mining_handle = tokio::task::spawn_blocking(move || {
@@ -350,11 +354,13 @@ async fn main() {
                 "  {:>6} | {:<15} | {:>20} | {:>6} | {:>6} | {:>5}"
             };
         }
-        println!(
-            row_fmt!(),
-            "Height", "Hash", "Reward", "Nonce", "Time", "UTXOs",
-        );
-        println!("  {}", "-".repeat(74));
+        if !interactive {
+            println!(
+                row_fmt!(),
+                "Height", "Hash", "Reward", "Nonce", "Time", "UTXOs",
+            );
+            println!("  {}", "-".repeat(74));
+        }
 
         while !mining_shutdown.load(Ordering::Relaxed) {
             let timestamp = unix_now();
@@ -411,35 +417,166 @@ async fn main() {
                 }
             }
 
-            let reward = subsidy(next_height);
-            println!(
-                row_fmt!(),
-                next_height,
-                short_hash(&block.block_hash().to_string()),
-                format!("{reward}"),
-                block.header.nonce,
-                format!("{:.1}s", elapsed.as_secs_f64()),
-                {
-                    let s = mining_state.blocking_read();
-                    s.utxo.len()
-                },
-            );
+            if !interactive {
+                let reward = subsidy(next_height);
+                println!(
+                    row_fmt!(),
+                    next_height,
+                    short_hash(&block.block_hash().to_string()),
+                    format!("{reward}"),
+                    block.header.nonce,
+                    format!("{:.1}s", elapsed.as_secs_f64()),
+                    {
+                        let s = mining_state.blocking_read();
+                        s.utxo.len()
+                    },
+                );
+            }
         }
 
         info!("Mining stopped.");
     });
 
-    // --- Wait for shutdown ----------------------------------------------- //
+    // --- Wait for shutdown / interactive REPL ----------------------------- //
 
-    loop {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if shutdown.load(Ordering::Relaxed) {
-            break;
+    if args.interactive {
+        run_repl(&args.rpc_addr, &shutdown).await;
+    } else {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
         }
     }
 
+    shutdown.store(true, Ordering::Relaxed);
     info!("Shutting down...");
     rpc_handle.stop().expect("rpc handle stop");
     let _ = mining_handle.await;
     info!("Goodbye.");
+}
+
+/// Interactive command-line REPL. Reads commands from stdin and
+/// dispatches them as RPC calls to the local server.
+async fn run_repl(rpc_addr: &str, shutdown: &AtomicBool) {
+    use jsonrpsee::core::client::ClientT;
+    use jsonrpsee::http_client::HttpClientBuilder;
+    use jsonrpsee::rpc_params;
+    use std::io::Write;
+
+    // Give the RPC server a moment to start.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let url = format!("http://{rpc_addr}");
+    let client = match HttpClientBuilder::default().build(&url) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to connect to local RPC: {e}");
+            return;
+        }
+    };
+
+    println!();
+    println!("  Type 'help' for available commands, 'exit' to quit.");
+    println!();
+
+    loop {
+        print!("bitaiir> ");
+        let _ = std::io::stdout().flush();
+
+        let line = match read_stdin_line().await {
+            Some(l) => l,
+            None => break, // EOF / Ctrl+D
+        };
+
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line == "exit" || line == "quit" {
+            break;
+        }
+
+        if line == "help" {
+            println!("  Available commands:");
+            println!("    getblockchaininfo              Show chain status");
+            println!("    getblock <height>              Show block details");
+            println!("    getnewaddress                  Generate a new address");
+            println!("    getbalance <address>           Show address balance");
+            println!("    sendtoaddress <address> <amt>  Send AIIR");
+            println!("    getmempoolinfo                 Show mempool status");
+            println!("    addpeer <ip:port>              Connect to a peer");
+            println!("    stop                           Stop the daemon");
+            println!("    help                           Show this help");
+            println!("    exit / quit                    Exit interactive mode");
+            println!();
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let cmd = parts[0];
+
+        let result: Result<serde_json::Value, _> = match cmd {
+            "getblockchaininfo" => client.request("getblockchaininfo", rpc_params![]).await,
+            "getblock" => {
+                let h: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                client.request("getblock", rpc_params![h]).await
+            }
+            "getnewaddress" => client.request("getnewaddress", rpc_params![]).await,
+            "getbalance" => {
+                let addr = parts.get(1).copied().unwrap_or("");
+                client
+                    .request("getbalance", rpc_params![addr.to_string()])
+                    .await
+            }
+            "sendtoaddress" => {
+                let addr = parts.get(1).copied().unwrap_or("");
+                let amt: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                client
+                    .request("sendtoaddress", rpc_params![addr.to_string(), amt])
+                    .await
+            }
+            "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,
+            "addpeer" => {
+                let addr = parts.get(1).copied().unwrap_or("");
+                client
+                    .request("addpeer", rpc_params![addr.to_string()])
+                    .await
+            }
+            "stop" => {
+                let _: std::result::Result<serde_json::Value, _> =
+                    client.request("stop", rpc_params![]).await;
+                println!("  Daemon stopping...");
+                shutdown.store(true, Ordering::Relaxed);
+                break;
+            }
+            _ => {
+                println!("  Unknown command: '{cmd}'. Type 'help' for available commands.");
+                continue;
+            }
+        };
+
+        match result {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(e) => println!("  Error: {e}"),
+        }
+    }
+}
+
+/// Read one line from stdin inside an async context (uses a blocking
+/// thread to avoid stalling the tokio runtime on Windows).
+async fn read_stdin_line() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        let mut buf = String::new();
+        match std::io::stdin().read_line(&mut buf) {
+            Ok(0) => None,
+            Ok(_) => Some(buf),
+            Err(_) => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
