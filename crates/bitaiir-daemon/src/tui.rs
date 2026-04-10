@@ -96,6 +96,11 @@ pub fn run_tui(
         // Poll for keyboard events (50ms timeout = ~20 FPS).
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                // On Windows, crossterm fires both Press and Release
+                // events for each keystroke. Only process Press.
+                if key.kind != crossterm::event::KeyEventKind::Press {
+                    continue;
+                }
                 match key.code {
                     KeyCode::Enter => {
                         let cmd = app.input.trim().to_string();
