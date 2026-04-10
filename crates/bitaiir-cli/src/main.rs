@@ -50,6 +50,12 @@ enum Commands {
     },
     /// Show the mempool status.
     Getmempoolinfo,
+    /// Start mining.
+    #[command(name = "mine-start")]
+    MineStart,
+    /// Stop mining.
+    #[command(name = "mine-stop")]
+    MineStop,
     /// Connect to a peer node.
     Addpeer {
         /// Address of the peer (ip:port).
@@ -85,6 +91,8 @@ async fn main() {
                 .await
         }
         Commands::Getmempoolinfo => client.request("getmempoolinfo", rpc_params![]).await,
+        Commands::MineStart => client.request("setmining", rpc_params![true]).await,
+        Commands::MineStop => client.request("setmining", rpc_params![false]).await,
         Commands::Addpeer { addr } => client.request("addpeer", rpc_params![addr.clone()]).await,
         Commands::Stop => client.request("stop", rpc_params![]).await,
     };

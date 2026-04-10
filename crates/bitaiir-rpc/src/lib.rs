@@ -159,6 +159,10 @@ pub trait BitaiirApi {
     #[method(name = "getmempoolinfo")]
     async fn get_mempool_info(&self) -> RpcResult<serde_json::Value>;
 
+    /// Start or stop mining. Pass `true` to start, `false` to stop.
+    #[method(name = "setmining")]
+    async fn set_mining(&self, active: bool) -> RpcResult<String>;
+
     /// Connect to a peer at the given address (ip:port) and perform
     /// the BitAiir handshake.
     #[method(name = "addpeer")]
@@ -185,6 +189,7 @@ pub struct BlockchainInfo {
 pub struct BitaiirRpcImpl {
     pub state: SharedState,
     pub shutdown: Arc<AtomicBool>,
+    pub mining_active: Arc<AtomicBool>,
     pub storage: Arc<Storage>,
 }
 
@@ -394,6 +399,15 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         Ok(serde_json::json!({
             "size": state.mempool.len(),
         }))
+    }
+
+    async fn set_mining(&self, active: bool) -> RpcResult<String> {
+        self.mining_active.store(active, Ordering::Relaxed);
+        if active {
+            Ok("Mining started.".to_string())
+        } else {
+            Ok("Mining stopped.".to_string())
+        }
     }
 
     async fn add_peer(&self, addr: String) -> RpcResult<serde_json::Value> {

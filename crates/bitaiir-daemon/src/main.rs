@@ -47,10 +47,12 @@ struct Args {
     /// Data directory for chain storage.
     #[arg(long, default_value = "bitaiir_data")]
     data_dir: String,
-    /// Disable mining (useful for a node that only syncs and serves RPC).
+    /// Enable mining on startup. Without this flag the node only
+    /// syncs, serves RPC, and relays transactions — like bitcoind.
     #[arg(long, default_value_t = false)]
-    no_mine: bool,
-    /// Interactive mode: show a command prompt instead of mining table.
+    mine: bool,
+    /// Interactive mode: show a command prompt where you can type
+    /// commands directly, including `mine start` / `mine stop`.
     #[arg(short, long, default_value_t = false)]
     interactive: bool,
 }
@@ -210,11 +212,15 @@ async fn main() {
 
     let shutdown = Arc::new(AtomicBool::new(false));
 
+    // Mining is controlled by this atomic flag.
+    let mining_active = Arc::new(AtomicBool::new(args.mine));
+
     // --- Start RPC server ------------------------------------------------ //
 
     let rpc_impl = BitaiirRpcImpl {
         state: state.clone(),
         shutdown: shutdown.clone(),
+        mining_active: mining_active.clone(),
         storage: storage.clone(),
     };
 
@@ -330,39 +336,46 @@ async fn main() {
 
     // --- Mining in background thread ------------------------------------- //
 
-    if args.no_mine {
-        info!("Mining disabled (--no-mine). Node will only sync and serve RPC.");
+    if args.mine {
+        info!("Mining enabled (--mine).");
+    } else {
+        info!("Mining disabled. Use --mine flag or 'mine start' in interactive mode.");
     }
 
     let mining_state = state.clone();
     let mining_shutdown = shutdown.clone();
+    let mining_active_ref = mining_active.clone();
     let mining_recipient = miner_recipient_hash;
-    let do_mine = !args.no_mine;
-    let interactive = args.interactive;
+    let _interactive = args.interactive;
     let mining_storage = storage.clone();
 
     let mining_handle = tokio::task::spawn_blocking(move || {
-        if !do_mine {
-            // Just wait for shutdown signal.
-            while !mining_shutdown.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            return;
-        }
+        let mut header_printed = false;
+
         macro_rules! row_fmt {
             () => {
                 "  {:>6} | {:<15} | {:>20} | {:>6} | {:>6} | {:>5}"
             };
         }
-        if !interactive {
-            println!(
-                row_fmt!(),
-                "Height", "Hash", "Reward", "Nonce", "Time", "UTXOs",
-            );
-            println!("  {}", "-".repeat(74));
-        }
 
         while !mining_shutdown.load(Ordering::Relaxed) {
+            // If mining is not active, sleep briefly and recheck.
+            if !mining_active_ref.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                continue;
+            }
+
+            // Print table header once when mining starts.
+            if !header_printed {
+                println!();
+                println!(
+                    row_fmt!(),
+                    "Height", "Hash", "Reward", "Nonce", "Time", "UTXOs",
+                );
+                println!("  {}", "-".repeat(74));
+                header_printed = true;
+            }
+
             let timestamp = unix_now();
 
             // Snapshot (short write lock).
@@ -395,7 +408,6 @@ async fn main() {
                     continue;
                 }
 
-                // Collect spent outpoints for storage.
                 let spent: Vec<OutPoint> = block
                     .transactions
                     .iter()
@@ -411,30 +423,28 @@ async fn main() {
                     s.utxo.apply_transaction(tx).unwrap();
                 }
 
-                // Persist to disk.
                 if let Err(e) = mining_storage.apply_block(next_height, &block, &spent) {
                     warn!("failed to persist block {next_height}: {e}");
                 }
             }
 
-            if !interactive {
-                let reward = subsidy(next_height);
-                println!(
-                    row_fmt!(),
-                    next_height,
-                    short_hash(&block.block_hash().to_string()),
-                    format!("{reward}"),
-                    block.header.nonce,
-                    format!("{:.1}s", elapsed.as_secs_f64()),
-                    {
-                        let s = mining_state.blocking_read();
-                        s.utxo.len()
-                    },
-                );
-            }
+            // Always print block info (both headless and interactive).
+            let reward = subsidy(next_height);
+            println!(
+                row_fmt!(),
+                next_height,
+                short_hash(&block.block_hash().to_string()),
+                format!("{reward}"),
+                block.header.nonce,
+                format!("{:.1}s", elapsed.as_secs_f64()),
+                {
+                    let s = mining_state.blocking_read();
+                    s.utxo.len()
+                },
+            );
         }
 
-        info!("Mining stopped.");
+        info!("Mining thread exiting.");
     });
 
     // --- Wait for shutdown / interactive REPL ----------------------------- //
@@ -507,6 +517,8 @@ async fn run_repl(rpc_addr: &str, shutdown: &AtomicBool) {
             println!("    getbalance <address>           Show address balance");
             println!("    sendtoaddress <address> <amt>  Send AIIR");
             println!("    getmempoolinfo                 Show mempool status");
+            println!("    mine start                     Start mining");
+            println!("    mine stop                      Stop mining");
             println!("    addpeer <ip:port>              Connect to a peer");
             println!("    stop                           Stop the daemon");
             println!("    help                           Show this help");
@@ -539,6 +551,17 @@ async fn run_repl(rpc_addr: &str, shutdown: &AtomicBool) {
                     .await
             }
             "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,
+            "mine" => {
+                let action = parts.get(1).copied().unwrap_or("status");
+                match action {
+                    "start" => client.request("setmining", rpc_params![true]).await,
+                    "stop" => client.request("setmining", rpc_params![false]).await,
+                    _ => {
+                        println!("  Usage: mine start | mine stop");
+                        continue;
+                    }
+                }
+            }
             "addpeer" => {
                 let addr = parts.get(1).copied().unwrap_or("");
                 client
