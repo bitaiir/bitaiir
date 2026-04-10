@@ -105,7 +105,7 @@ a BitAiir artifact cannot be confused with a Bitcoin artifact.
 | Tail emission floor            | 10 AIIR / block                              | provisional  |
 | Approximate long-term supply   | ~11.26 billion AIIR at year 100              | provisional  |
 | Target block time              | 5 seconds                                    | provisional  |
-| Difficulty retarget interval   | 144 blocks                                   | provisional  |
+| Difficulty retarget interval   | 20 blocks                                    | provisional  |
 | Max difficulty adjustment      | 4× per retarget                              | provisional  |
 | Initial difficulty `bits`      | `0x2000ffff`                                 | provisional  |
 | Proof of work                  | Proof of Aiir (SHA-256d + Argon2id wrap)     | provisional  |
@@ -605,13 +605,13 @@ A block is valid if and only if its `aiir_pow` hash, treated as a
 
 ### 8.4 Difficulty adjustment
 
-Every **144 blocks** (approximately 12 minutes at the target block
+Every **20 blocks** (approximately 100 seconds at the target block
 time), the network recomputes the target from the time it took to mine
-the previous 144-block window:
+the previous 20-block window:
 
 ```
-actual_time   = block[i].timestamp - block[i - 144].timestamp
-expected_time = 144 * 5            // 720 seconds
+actual_time   = block[i].timestamp - block[i - 20].timestamp
+expected_time = 20 * 5             // 100 seconds
 
 new_target = old_target * actual_time / expected_time
 ```
@@ -620,15 +620,20 @@ The ratio `actual_time / expected_time` is clamped to the range
 `[1/4, 4]` to prevent a single window from changing the difficulty by
 more than a factor of 4. The resulting `new_target` is re-encoded into
 `bits` form with any necessary rounding, and becomes the required
-target for the next 144 blocks.
+target for the next 20 blocks.
+
+A future protocol version may migrate to per-block difficulty
+adjustment using LWMA (Linearly Weighted Moving Average), which
+gives even faster response and smoother transitions. The 20-block
+batch retarget is the v1 choice for implementation simplicity.
 
 ### 8.5 Initial difficulty
 
-The genesis block and every block up to and including block 143 use
+The genesis block and every block up to and including block 19 use
 the hardcoded `bits = 0x2000ffff`. This target is deliberately easy so
 that the first miners, running Proof of Aiir on commodity CPUs, can
 produce blocks at roughly the target rate even without Argon2id
-optimization. The first retarget happens at block 144.
+optimization. The first retarget happens at block 20.
 
 ### 8.6 Median time past
 
@@ -751,7 +756,7 @@ before mainnet:
    commodity laptop finds a nonce in approximately 2 seconds.
 3. **Initial Proof-of-Aiir difficulty.** The `bits = 0x2000ffff`
    initial value must be validated against real CPU performance so
-   that the first 144 blocks take roughly `144 * 5 = 720 seconds` on a
+   that the first 20 blocks take roughly `20 * 5 = 100 seconds` on a
    single-laptop bootstrap network.
 4. **DNS seeds.** Where do fresh nodes get their first peers from? A
    hardcoded list? A DNS-based discovery scheme?

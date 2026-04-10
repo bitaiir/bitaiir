@@ -20,7 +20,9 @@ pub const MAX_TX_SIZE: usize = 100_000;
 pub const COINBASE_MATURITY: u64 = 100;
 
 /// Number of blocks between difficulty retargets (protocol §8.4).
-pub const RETARGET_INTERVAL: u64 = 144;
+/// Set to 20 for fast adaptation in a small network (~100 s at the
+/// target block time). v2 will migrate to per-block LWMA.
+pub const RETARGET_INTERVAL: u64 = 20;
 
 /// Target block time in seconds (protocol §2).
 pub const TARGET_BLOCK_TIME: u64 = 5;
