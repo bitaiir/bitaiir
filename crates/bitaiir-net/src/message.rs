@@ -15,6 +15,12 @@ pub enum NetMessage {
     Ping(u64),
     /// Keepalive response. Echoes the nonce from Ping.
     Pong(u64),
+    /// Request blocks from a given height onward.
+    GetBlocks(u64),
+    /// A serialized block (canonical bincode bytes).
+    BlockData(Vec<u8>),
+    /// Signals the end of a block sync stream.
+    SyncDone,
 }
 
 /// Payload of the `version` message.
@@ -40,6 +46,9 @@ impl NetMessage {
             NetMessage::Verack => "verack",
             NetMessage::Ping(_) => "ping",
             NetMessage::Pong(_) => "pong",
+            NetMessage::GetBlocks(_) => "getblocks",
+            NetMessage::BlockData(_) => "block",
+            NetMessage::SyncDone => "syncdone",
         }
     }
 
@@ -61,6 +70,9 @@ impl NetMessage {
             NetMessage::Verack => Vec::new(),
             NetMessage::Ping(nonce) => nonce.to_le_bytes().to_vec(),
             NetMessage::Pong(nonce) => nonce.to_le_bytes().to_vec(),
+            NetMessage::GetBlocks(start) => start.to_le_bytes().to_vec(),
+            NetMessage::BlockData(bytes) => bytes.clone(),
+            NetMessage::SyncDone => Vec::new(),
         }
     }
 
@@ -98,6 +110,12 @@ impl NetMessage {
                 let nonce = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
                 Some(NetMessage::Pong(nonce))
             }
+            "getblocks" => {
+                let start = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
+                Some(NetMessage::GetBlocks(start))
+            }
+            "block" => Some(NetMessage::BlockData(payload.to_vec())),
+            "syncdone" => Some(NetMessage::SyncDone),
             _ => None,
         }
     }

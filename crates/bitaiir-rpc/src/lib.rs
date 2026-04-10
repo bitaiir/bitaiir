@@ -412,12 +412,109 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             )
         })?;
 
+        // If the peer has more blocks, sync them.
+        let mut synced_blocks: u64 = 0;
+        if their_version.best_height > our_height {
+            tracing::info!(
+                "peer is ahead: their height={}, ours={}. Syncing...",
+                their_version.best_height,
+                our_height,
+            );
+
+            peer.send(&bitaiir_net::NetMessage::GetBlocks(our_height))
+                .await
+                .map_err(|e| {
+                    jsonrpsee::types::ErrorObjectOwned::owned(
+                        -12,
+                        format!("failed to request blocks: {e}"),
+                        None::<()>,
+                    )
+                })?;
+
+            // Receive blocks until SyncDone.
+            loop {
+                let msg = peer.receive().await.map_err(|e| {
+                    jsonrpsee::types::ErrorObjectOwned::owned(
+                        -13,
+                        format!("sync error: {e}"),
+                        None::<()>,
+                    )
+                })?;
+
+                match msg {
+                    bitaiir_net::NetMessage::BlockData(bytes) => {
+                        let block: bitaiir_types::Block =
+                            bitaiir_types::encoding::from_bytes(&bytes).map_err(|e| {
+                                jsonrpsee::types::ErrorObjectOwned::owned(
+                                    -14,
+                                    format!("invalid block data: {e}"),
+                                    None::<()>,
+                                )
+                            })?;
+
+                        let mut state = self.state.write().await;
+                        let height = state.chain.height() + 1;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+
+                        // Validate the block (skip future-timestamp for synced blocks).
+                        if let Err(e) = bitaiir_chain::validate_block(
+                            &block,
+                            &state.chain,
+                            &state.utxo,
+                            now + 7200,
+                        ) {
+                            tracing::warn!(
+                                "synced block at height {height} failed validation: {e}"
+                            );
+                            break;
+                        }
+
+                        // Collect spent outpoints for storage.
+                        let spent: Vec<OutPoint> = block
+                            .transactions
+                            .iter()
+                            .skip(1)
+                            .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
+                            .collect();
+
+                        state.chain.push(block.clone()).unwrap();
+                        for tx in &block.transactions {
+                            state.utxo.apply_transaction(tx).unwrap();
+                        }
+
+                        // Persist.
+                        if let Err(e) = self.storage.apply_block(height, &block, &spent) {
+                            tracing::warn!("failed to persist synced block {height}: {e}");
+                        }
+
+                        synced_blocks += 1;
+                        tracing::info!("synced block {height}");
+                    }
+                    bitaiir_net::NetMessage::SyncDone => {
+                        tracing::info!("sync complete: {synced_blocks} blocks received");
+                        break;
+                    }
+                    _ => {} // ignore other messages during sync
+                }
+            }
+        }
+
+        let new_height = {
+            let state = self.state.read().await;
+            state.chain.height()
+        };
+
         Ok(serde_json::json!({
             "peer": addr,
             "user_agent": their_version.user_agent,
-            "height": their_version.best_height,
+            "peer_height": their_version.best_height,
             "protocol_version": their_version.protocol_version,
-            "status": "connected",
+            "synced_blocks": synced_blocks,
+            "new_height": new_height,
+            "status": if synced_blocks > 0 { "connected and synced" } else { "connected" },
         }))
     }
 

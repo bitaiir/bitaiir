@@ -22,6 +22,7 @@ use std::time::Instant;
 use bitaiir_chain::{Chain, Mempool, UtxoSet, create_test_genesis, subsidy, validate_block};
 use bitaiir_crypto::hash::hash160;
 use bitaiir_net::Peer;
+use bitaiir_net::message::NetMessage;
 use bitaiir_rpc::{BitaiirApiServer, BitaiirRpcImpl, NodeState, SharedState, Wallet};
 use bitaiir_storage::Storage;
 use bitaiir_types::OutPoint;
@@ -46,6 +47,9 @@ struct Args {
     /// Data directory for chain storage.
     #[arg(long, default_value = "bitaiir_data")]
     data_dir: String,
+    /// Disable mining (useful for a node that only syncs and serves RPC).
+    #[arg(long, default_value_t = false)]
+    no_mine: bool,
 }
 
 fn unix_now() -> u64 {
@@ -222,7 +226,9 @@ async fn main() {
 
     let p2p_state = state.clone();
     let p2p_addr = args.p2p_addr.clone();
+    let p2p_storage = storage.clone();
     tokio::spawn(async move {
+        let storage = p2p_storage;
         let listener = match TcpListener::bind(&p2p_addr).await {
             Ok(l) => l,
             Err(e) => {
@@ -236,21 +242,64 @@ async fn main() {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     let state = p2p_state.clone();
+                    let _storage = storage.clone();
                     tokio::spawn(async move {
                         let our_height = {
                             let s = state.read().await;
                             s.chain.height()
                         };
                         let mut peer = Peer::new(stream, addr);
-                        match peer.handshake_inbound(our_height).await {
+                        let version = match peer.handshake_inbound(our_height).await {
                             Ok(v) => {
                                 info!(
                                     "inbound peer {} connected: agent={}, height={}",
                                     addr, v.user_agent, v.best_height,
                                 );
+                                v
                             }
                             Err(e) => {
                                 warn!("inbound handshake with {addr} failed: {e}");
+                                return;
+                            }
+                        };
+                        let _ = version;
+
+                        // Message loop: serve block requests.
+                        loop {
+                            match peer.receive().await {
+                                Ok(NetMessage::GetBlocks(start_height)) => {
+                                    info!("peer {addr} requests blocks from height {start_height}");
+                                    let s = state.read().await;
+                                    let tip = s.chain.height();
+                                    for h in (start_height + 1)..=tip {
+                                        if let Some(block) = s.chain.block_at(h) {
+                                            let bytes = bitaiir_types::encoding::to_bytes(block)
+                                                .expect("block encodes");
+                                            if peer
+                                                .send(&NetMessage::BlockData(bytes))
+                                                .await
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    drop(s); // release lock before sending
+                                    let _ = peer.send(&NetMessage::SyncDone).await;
+                                    info!(
+                                        "sent blocks {} to {} to peer {addr}",
+                                        start_height + 1,
+                                        tip
+                                    );
+                                }
+                                Ok(NetMessage::Ping(nonce)) => {
+                                    let _ = peer.send(&NetMessage::Pong(nonce)).await;
+                                }
+                                Ok(_) => { /* ignore other messages */ }
+                                Err(_) => {
+                                    info!("peer {addr} disconnected");
+                                    break;
+                                }
                             }
                         }
                     });
@@ -264,12 +313,24 @@ async fn main() {
 
     // --- Mining in background thread ------------------------------------- //
 
+    if args.no_mine {
+        info!("Mining disabled (--no-mine). Node will only sync and serve RPC.");
+    }
+
     let mining_state = state.clone();
     let mining_shutdown = shutdown.clone();
     let mining_recipient = miner_recipient_hash;
+    let do_mine = !args.no_mine;
     let mining_storage = storage.clone();
 
     let mining_handle = tokio::task::spawn_blocking(move || {
+        if !do_mine {
+            // Just wait for shutdown signal.
+            while !mining_shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            return;
+        }
         macro_rules! row_fmt {
             () => {
                 "  {:>6} | {:<15} | {:>20} | {:>6} | {:>6} | {:>5}"
