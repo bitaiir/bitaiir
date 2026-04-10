@@ -38,3 +38,37 @@ pub const MEDIAN_TIME_SPAN: usize = 11;
 /// relative to the node's adjusted time, in seconds (protocol §7.4
 /// rule 5). Set to two hours.
 pub const MAX_FUTURE_BLOCK_TIME: u64 = 2 * 60 * 60;
+
+// --- Proof of Aiir (Argon2id parameters, protocol §8.2 / §8.7) ---------- //
+
+/// Argon2id memory cost in KiB.
+///
+/// Production builds use 64 MiB (65 536 KiB), which forces every
+/// mining attempt to allocate and sequentially traverse 64 MiB of
+/// RAM. This is the anti-ASIC barrier.
+///
+/// Test builds use a drastically reduced 256 KiB so that `cargo test`
+/// finishes in seconds rather than minutes. The code path is
+/// identical; only the wall-clock time and ASIC-resistance properties
+/// differ. CI should periodically run a dedicated integration test
+/// with the production value to catch regressions in the real
+/// algorithm.
+#[cfg(not(test))]
+pub const AIIR_POW_MEMORY_KIB: u32 = 65_536;
+
+#[cfg(test)]
+pub const AIIR_POW_MEMORY_KIB: u32 = 256;
+
+/// Argon2id time cost (number of passes over the memory). One pass
+/// is sufficient for our use: the memory-hardness, not the iteration
+/// count, is the bottleneck for ASIC builders.
+pub const AIIR_POW_TIME_COST: u32 = 1;
+
+/// Argon2id parallelism (number of independent lanes). Set to 1 so
+/// every miner uses a single thread per attempt. Multi-threaded
+/// mining is achieved by running multiple independent attempts on
+/// different nonces, not by parallelising a single Argon2 invocation.
+pub const AIIR_POW_PARALLELISM: u32 = 1;
+
+/// Argon2id output length in bytes.
+pub const AIIR_POW_OUTPUT_LEN: usize = 32;

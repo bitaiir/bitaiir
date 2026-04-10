@@ -9,9 +9,12 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-# Hashing used by the Proof-of-Aiir stub (double_sha256) and by the
-# merkle-root recomputation in validate_block.
+# Hashing (sha256, double_sha256) used by the Proof-of-Aiir function
+# and by the merkle-root recomputation in validate_block.
 bitaiir-crypto = { workspace = true }
+
+# Argon2id memory-hard function — the anti-ASIC core of Proof of Aiir.
+argon2 = { workspace = true }
 
 # The subsidy schedule returns `Amount` values, and the validation
 # layer inspects `Block`, `Transaction`, and friends from this crate.
