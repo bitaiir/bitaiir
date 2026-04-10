@@ -156,6 +156,7 @@ dependencies = [
  "bs58",
  "hex",
  "hmac",
+ "rand",
  "ripemd",
  "secp256k1",
  "serde",

@@ -93,6 +93,14 @@ pub enum Error {
     /// Sum of outputs exceeds sum of inputs (money creation).
     #[error("outputs total {outputs} exceeds inputs total {inputs}")]
     OutputsExceedInputs { inputs: u64, outputs: u64 },
+
+    /// The pubkey in a TxIn does not hash to the UTXO's recipient_hash.
+    #[error("pubkey hash mismatch for outpoint {0:?}")]
+    PubkeyMismatch(OutPoint),
+
+    /// The ECDSA signature in a TxIn is invalid.
+    #[error("invalid signature for outpoint {0:?}")]
+    InvalidInputSignature(OutPoint),
 }
 
 /// Convenience alias.

@@ -28,6 +28,8 @@
 
 use std::collections::HashSet;
 
+use bitaiir_crypto::hash::hash160;
+use bitaiir_crypto::key::PublicKey;
 use bitaiir_types::{Block, OutPoint, Transaction, encoding};
 
 use crate::chain::Chain;
@@ -57,7 +59,6 @@ use crate::utxo::UtxoSet;
 ///
 /// # Rules NOT checked (yet)
 ///
-/// - ECDSA signature validity.
 /// - Anti-spam `pow_nonce` (Phase 3).
 /// - Coinbase maturity of the spent outputs.
 pub fn validate_transaction(tx: &Transaction, utxo_set: &UtxoSet) -> Result<()> {
@@ -88,12 +89,28 @@ pub fn validate_transaction(tx: &Transaction, utxo_set: &UtxoSet) -> Result<()> 
         }
     }
 
-    // Rule: every input exists in the UTXO set, and tally the totals.
+    // Rule: every input exists, signature and pubkey are valid.
+    let sighash = tx.sighash();
     let mut input_total: u64 = 0;
     for input in &tx.inputs {
         let utxo = utxo_set
             .get(&input.prev_out)
             .ok_or(Error::UnknownInput(input.prev_out))?;
+
+        // Check that the pubkey hashes to the UTXO's recipient_hash.
+        let pubkey_hash = hash160(&input.pubkey);
+        if pubkey_hash != utxo.recipient_hash {
+            return Err(Error::PubkeyMismatch(input.prev_out));
+        }
+
+        // Verify the ECDSA signature against the sighash.
+        let Ok(pubkey) = PublicKey::from_slice(&input.pubkey) else {
+            return Err(Error::InvalidInputSignature(input.prev_out));
+        };
+        if !pubkey.verify_digest(sighash.as_bytes(), &input.signature) {
+            return Err(Error::InvalidInputSignature(input.prev_out));
+        }
+
         input_total = input_total.saturating_add(utxo.amount.to_atomic());
     }
 
@@ -291,7 +308,9 @@ fn median_time_past(chain: &Chain) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{mine_test_nonce, sample_block, sample_coinbase, sample_normal_tx};
+    use crate::test_util::{
+        mine_test_nonce, sample_block, sample_coinbase, sample_normal_tx, test_private_key,
+    };
     use bitaiir_types::{Amount, Hash256, OutPoint, TxOut};
 
     /// Build a small chain + UTXO set with one block (the genesis)
@@ -608,8 +627,13 @@ mod tests {
             vout: 0,
         };
         // Craft a tx that outputs more than the input (100 AIIR).
+        // We must re-sign after changing the output amount because
+        // the original signature covers the old sighash (which
+        // includes the outputs).
         let mut tx = sample_normal_tx(spend, 7);
         tx.outputs[0].amount = Amount::from_atomic(200 * 100_000_000);
+        let sighash = tx.sighash();
+        tx.inputs[0].signature = test_private_key().sign_digest(sighash.as_bytes());
         let err = validate_transaction(&tx, &utxo).unwrap_err();
         assert!(matches!(err, Error::OutputsExceedInputs { .. }));
     }

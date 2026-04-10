@@ -11,7 +11,10 @@
 //! representation is redacted, so they cannot be accidentally printed to
 //! logs or error messages.
 
-use secp256k1::{PublicKey as Secp256k1PublicKey, SECP256K1, SecretKey};
+use secp256k1::{
+    Message, PublicKey as Secp256k1PublicKey, SECP256K1, SecretKey,
+    ecdsa::Signature as EcdsaSignature,
+};
 
 use crate::error::{Error, Result};
 
@@ -46,6 +49,31 @@ impl PrivateKey {
         PublicKey(self.0.public_key(SECP256K1))
     }
 
+    /// Generate a new random private key using the OS CSPRNG.
+    pub fn generate() -> Self {
+        use rand::RngCore;
+        let mut rng = rand::rngs::OsRng;
+        loop {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            if let Ok(key) = Self::from_bytes(&bytes) {
+                return key;
+            }
+        }
+    }
+
+    /// Produce a compact 64-byte ECDSA signature over a 32-byte digest.
+    ///
+    /// This is the raw signing primitive used for transaction inputs.
+    /// The digest should be the transaction's sighash (see
+    /// `Transaction::sighash()`). RFC 6979 deterministic nonces are
+    /// used internally by libsecp256k1.
+    pub fn sign_digest(&self, digest: &[u8; 32]) -> Vec<u8> {
+        let msg = Message::from_digest(*digest);
+        let sig = SECP256K1.sign_ecdsa(&msg, &self.0);
+        sig.serialize_compact().to_vec()
+    }
+
     /// Borrow the inner `secp256k1::SecretKey`. Used by the `signature`
     /// module to call into the upstream signing API without re-wrapping.
     pub(crate) fn as_secp256k1(&self) -> &SecretKey {
@@ -74,6 +102,17 @@ impl PublicKey {
         Secp256k1PublicKey::from_slice(data)
             .map(Self)
             .map_err(|_| Error::InvalidPublicKey)
+    }
+
+    /// Verify a compact 64-byte ECDSA signature against a 32-byte
+    /// digest. Returns `true` if the signature is valid under this
+    /// public key.
+    pub fn verify_digest(&self, digest: &[u8; 32], sig_bytes: &[u8]) -> bool {
+        let Ok(sig) = EcdsaSignature::from_compact(sig_bytes) else {
+            return false;
+        };
+        let msg = Message::from_digest(*digest);
+        SECP256K1.verify_ecdsa(&msg, &sig, &self.0).is_ok()
     }
 
     /// Serialize as 33 bytes in SEC1 compressed format: `0x02` or `0x03`

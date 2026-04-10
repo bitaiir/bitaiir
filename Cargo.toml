@@ -71,6 +71,7 @@ ripemd = "0.1"
 hmac = "0.12"
 bs58 = "0.5"
 base64 = "0.22"
+rand = "0.8"
 
 # Errors. `thiserror` is the standard for library error enums; `anyhow` is for
 # binaries where we don't care about the exact error type.

@@ -30,6 +30,9 @@ secp256k1 = { workspace = true }
 # Base64 for the signed-message wire format (Bitcoin convention).
 base64 = { workspace = true }
 
+# Cryptographic random number generation for key generation.
+rand = { workspace = true }
+
 # Errors.
 thiserror = { workspace = true }
 
