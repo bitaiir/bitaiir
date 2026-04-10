@@ -351,11 +351,13 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         let filtered = filter_commands(prefix);
 
         if !filtered.is_empty() {
-            let popup_height = (filtered.len() as u16 + 2).min(14); // +2 for borders
+            let popup_width: u16 = 55;
+            let popup_height = (filtered.len() as u16 + 2).min(14);
+            let inner_width = popup_width.saturating_sub(2) as usize; // minus borders
             let popup_area = ratatui::layout::Rect {
                 x: chunks[1].x,
                 y: chunks[1].y.saturating_sub(popup_height),
-                width: chunks[1].width.min(55),
+                width: popup_width,
                 height: popup_height,
             };
 
@@ -368,13 +370,25 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                     } else {
                         (Color::Gray, Color::Black)
                     };
-                    Line::from(vec![
-                        Span::styled(
-                            format!(" /{:<22}", name),
-                            Style::default().fg(Color::Cyan).bg(bg),
-                        ),
-                        Span::styled(format!(" {desc:<20}"), Style::default().fg(fg).bg(bg)),
-                    ])
+                    // Build the full line padded to inner_width so the
+                    // background color fills edge-to-edge.
+                    let text = format!(" /{:<22} {desc}", name);
+                    let padded = format!("{:<width$}", text, width = inner_width);
+                    let mut spans = Vec::new();
+                    // Color the command name part (first 24 chars) in cyan,
+                    // the rest in fg.
+                    let cmd_end = 24.min(padded.len());
+                    spans.push(Span::styled(
+                        padded[..cmd_end].to_string(),
+                        Style::default().fg(Color::Cyan).bg(bg),
+                    ));
+                    if padded.len() > cmd_end {
+                        spans.push(Span::styled(
+                            padded[cmd_end..].to_string(),
+                            Style::default().fg(fg).bg(bg),
+                        ));
+                    }
+                    Line::from(spans)
                 })
                 .collect();
 
