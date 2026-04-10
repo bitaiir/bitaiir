@@ -276,6 +276,8 @@ pub fn run_tui(
 
 /// Draw the UI: log area (top) + input bar (bottom).
 fn draw_ui(f: &mut ratatui::Frame, app: &App) {
+    use ratatui::widgets::BorderType;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -285,27 +287,44 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .split(f.area());
 
     // --- Log area -------------------------------------------------------- //
+
+    // Muted color palette for a clean, modern look.
+    let dim = Style::default().fg(Color::DarkGray);
+    let accent = Color::Rgb(100, 180, 255); // soft blue
+    let green = Color::Rgb(80, 200, 120); // soft green
+    let red = Color::Rgb(240, 80, 80); // soft red
+    let cyan = Color::Rgb(80, 220, 220); // soft cyan
+    let yellow = Color::Rgb(255, 200, 60); // warm yellow
+
     let log_lines: Vec<Line> = app
         .logs
         .iter()
         .map(|s| {
             if s.starts_with("  >") {
-                // Command lines in cyan.
-                Line::from(Span::styled(s.as_str(), Style::default().fg(Color::Cyan)))
+                // User commands in accent blue.
+                Line::from(Span::styled(s.as_str(), Style::default().fg(accent)))
+            } else if s.contains("Height") && s.contains("Hash") {
+                // Table header in dim.
+                Line::from(Span::styled(s.as_str(), dim))
+            } else if s.contains("---") && !s.contains('"') {
+                // Separator lines in dim.
+                Line::from(Span::styled(s.as_str(), dim))
             } else if s.contains("Block") || s.contains("mined") || s.contains("Mining") {
                 // Mining events in green.
-                Line::from(Span::styled(s.as_str(), Style::default().fg(Color::Green)))
+                Line::from(Span::styled(s.as_str(), Style::default().fg(green)))
             } else if s.contains("ERROR") || s.contains("Error") || s.contains("failed") {
-                // Errors in red.
-                Line::from(Span::styled(s.as_str(), Style::default().fg(Color::Red)))
+                Line::from(Span::styled(s.as_str(), Style::default().fg(red)))
+            } else if s.contains('"') || s.contains('{') || s.contains('}') {
+                // JSON output in soft white.
+                Line::from(Span::styled(s.as_str(), Style::default().fg(Color::White)))
             } else {
-                Line::from(s.as_str())
+                Line::from(Span::styled(s.as_str(), Style::default().fg(Color::Gray)))
             }
         })
         .collect();
 
     // Auto-scroll to bottom.
-    let visible_height = chunks[0].height.saturating_sub(2) as usize; // -2 for borders
+    let visible_height = chunks[0].height.saturating_sub(2) as usize;
     let scroll = if log_lines.len() > visible_height {
         (log_lines.len() - visible_height) as u16
     } else {
@@ -316,12 +335,10 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray))
                 .title(" BitAiir Core v0.1.0 ")
-                .title_style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                .title_style(Style::default().fg(yellow).add_modifier(Modifier::BOLD)),
         )
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
@@ -329,15 +346,29 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     f.render_widget(log_panel, chunks[0]);
 
     // --- Input bar ------------------------------------------------------- //
-    let input_text = format!("bitaiir> {}", app.input);
-    let input_bar = Paragraph::new(input_text.as_str())
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(Color::White));
+
+    // Styled prompt: "bitaiir" in accent, "> " dim, input in white.
+    let input_line = Line::from(vec![
+        Span::styled(
+            " bitaiir",
+            Style::default().fg(yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("> ", Style::default().fg(Color::DarkGray)),
+        Span::styled(app.input.as_str(), Style::default().fg(Color::White)),
+    ]);
+
+    let input_bar = Paragraph::new(input_line).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
 
     f.render_widget(input_bar, chunks[1]);
 
-    // Position the cursor inside the input bar.
-    let cursor_x = chunks[1].x + 1 + "bitaiir> ".len() as u16 + app.input.len() as u16;
+    // Position the cursor after the prompt + input text.
+    let prompt_len = " bitaiir> ".len() as u16;
+    let cursor_x = chunks[1].x + 1 + prompt_len + app.input.len() as u16;
     let cursor_y = chunks[1].y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
 
@@ -361,26 +392,23 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                 height: popup_height,
             };
 
+            let accent = Color::Rgb(100, 180, 255);
             let items: Vec<Line> = filtered
                 .iter()
                 .enumerate()
                 .map(|(i, (name, desc))| {
                     let (fg, bg) = if i == app.autocomplete_idx {
-                        (Color::White, Color::DarkGray)
+                        (Color::White, Color::Rgb(50, 50, 70))
                     } else {
-                        (Color::Gray, Color::Black)
+                        (Color::Gray, Color::Rgb(20, 20, 30))
                     };
-                    // Build the full line padded to inner_width so the
-                    // background color fills edge-to-edge.
                     let text = format!(" /{:<22} {desc}", name);
                     let padded = format!("{:<width$}", text, width = inner_width);
-                    let mut spans = Vec::new();
-                    // Color the command name part (first 24 chars) in cyan,
-                    // the rest in fg.
                     let cmd_end = 24.min(padded.len());
+                    let mut spans = Vec::new();
                     spans.push(Span::styled(
                         padded[..cmd_end].to_string(),
-                        Style::default().fg(Color::Cyan).bg(bg),
+                        Style::default().fg(accent).bg(bg),
                     ));
                     if padded.len() > cmd_end {
                         spans.push(Span::styled(
@@ -395,7 +423,9 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
             let popup = Paragraph::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
                     .title(" Commands ")
+                    .title_style(Style::default().fg(Color::Rgb(255, 200, 60)))
                     .border_style(Style::default().fg(Color::DarkGray)),
             );
 
