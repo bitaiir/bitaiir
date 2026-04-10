@@ -62,7 +62,7 @@ mod test_util;
 pub use chain::Chain;
 pub use error::{Error, Result};
 pub use mempool::Mempool;
-pub use mining::{create_test_genesis, mine_block};
+pub use mining::{create_test_genesis, mine_block, mine_block_from_params, required_bits};
 pub use pow::aiir_pow;
 pub use subsidy::{BLOCKS_PER_HALVING, INITIAL_SUBSIDY, TAIL_EMISSION, subsidy};
 pub use target::CompactTarget;

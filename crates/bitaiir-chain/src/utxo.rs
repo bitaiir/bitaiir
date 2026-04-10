@@ -62,6 +62,11 @@ impl UtxoSet {
         self.utxos.contains_key(outpoint)
     }
 
+    /// Iterate over every `(OutPoint, TxOut)` pair in the set.
+    pub fn iter(&self) -> impl Iterator<Item = (&OutPoint, &TxOut)> {
+        self.utxos.iter()
+    }
+
     /// Insert an output directly, used for bootstrapping or tests.
     /// Returns the previous occupant, if any.
     pub fn insert(&mut self, outpoint: OutPoint, txout: TxOut) -> Option<TxOut> {

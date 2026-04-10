@@ -170,6 +170,7 @@ name = "bitaiir-daemon"
 version = "0.1.0"
 dependencies = [
  "bitaiir-chain",
+ "bitaiir-crypto",
  "bitaiir-rpc",
  "bitaiir-types",
  "jsonrpsee",
@@ -191,6 +192,7 @@ name = "bitaiir-rpc"
 version = "0.1.0"
 dependencies = [
  "bitaiir-chain",
+ "bitaiir-crypto",
  "bitaiir-types",
  "jsonrpsee",
  "serde",

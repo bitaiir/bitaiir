@@ -19,15 +19,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use bitaiir_chain::{
-    Chain, Mempool, UtxoSet, create_test_genesis, mine_block, subsidy, validate_block,
-};
-use bitaiir_rpc::{BitaiirApiServer, BitaiirRpcImpl, NodeState, SharedState};
+use bitaiir_chain::{Chain, Mempool, UtxoSet, create_test_genesis, subsidy, validate_block};
+use bitaiir_crypto::hash::hash160;
+use bitaiir_rpc::{BitaiirApiServer, BitaiirRpcImpl, NodeState, SharedState, Wallet};
 use jsonrpsee::server::ServerBuilder;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-const MINER_RECIPIENT: [u8; 20] = [0x42; 20];
 const GENESIS_MESSAGE: &str =
     "Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos";
 const RPC_ADDR: &str = "127.0.0.1:8443";
@@ -64,11 +62,21 @@ async fn main() {
     println!("  RPC server: http://{RPC_ADDR}");
     println!();
 
+    // --- Generate miner address ------------------------------------------ //
+
+    let mut wallet = Wallet::new();
+    let miner_address = wallet.generate_address();
+    let (_, miner_pubkey) = wallet.get_keys(&miner_address).unwrap().clone();
+    let miner_recipient_hash = hash160(&miner_pubkey.to_compressed());
+
+    println!("  Miner address: {miner_address}");
+    println!();
+
     // --- Genesis --------------------------------------------------------- //
 
     println!("  Mining genesis block...");
     let genesis_start = Instant::now();
-    let genesis = create_test_genesis(MINER_RECIPIENT, unix_now(), GENESIS_MESSAGE);
+    let genesis = create_test_genesis(miner_recipient_hash, unix_now(), GENESIS_MESSAGE);
     let genesis_elapsed = genesis_start.elapsed();
 
     let embedded_msg = String::from_utf8_lossy(&genesis.transactions[0].inputs[0].signature);
@@ -91,6 +99,8 @@ async fn main() {
     let state: SharedState = Arc::new(RwLock::new(NodeState {
         chain: Chain::with_genesis(genesis),
         utxo,
+        mempool: Mempool::new(),
+        wallet,
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -114,6 +124,7 @@ async fn main() {
 
     let mining_state = state.clone();
     let mining_shutdown = shutdown.clone();
+    let mining_recipient = miner_recipient_hash;
 
     let mining_handle = tokio::task::spawn_blocking(move || {
         // Table header (printed once).
@@ -128,25 +139,37 @@ async fn main() {
         );
         println!("  {}", "-".repeat(74));
 
-        let mut mempool = Mempool::new();
-
         while !mining_shutdown.load(Ordering::Relaxed) {
-            // Read current state to prepare mining.
-            let (tip, height, timestamp) = {
-                let s = mining_state.blocking_read();
-                (s.chain.tip(), s.chain.height() + 1, unix_now())
-            };
-            let _ = tip; // used implicitly by mine_block reading chain
+            let timestamp = unix_now();
 
-            // Mine (CPU-heavy, runs in the blocking thread pool).
-            let start = Instant::now();
-            let block = {
-                let s = mining_state.blocking_read();
-                mine_block(&s.chain, &mut mempool, MINER_RECIPIENT, timestamp)
+            // Step 1: Snapshot chain state under a SHORT write lock.
+            // This takes the mempool transactions and the chain
+            // parameters needed for mining, then releases the lock
+            // immediately so RPC handlers are not blocked.
+            let (prev_hash, next_height, bits, user_txs) = {
+                let mut s = mining_state.blocking_write();
+                let h = s.chain.height() + 1;
+                let tip = s.chain.tip();
+                let b = bitaiir_chain::required_bits(&s.chain, h);
+                let txs = s.mempool.take_for_block(2000);
+                (tip, h, b, txs)
             };
+            // Lock is released here — RPC is fully available during mining.
+
+            // Step 2: Mine (CPU-heavy, NO lock held). This is where
+            // Argon2id runs for potentially seconds per attempt.
+            let start = Instant::now();
+            let block = bitaiir_chain::mine_block_from_params(
+                prev_hash,
+                next_height,
+                bits,
+                user_txs,
+                mining_recipient,
+                timestamp,
+            );
             let elapsed = start.elapsed();
 
-            // Validate and commit under write lock.
+            // Step 3: Validate and commit under a SHORT write lock.
             {
                 let mut s = mining_state.blocking_write();
                 if let Err(e) = validate_block(&block, &s.chain, &s.utxo, timestamp + 1) {
@@ -164,10 +187,10 @@ async fn main() {
 
             // Print progress (state is unlocked now).
             let block_hash = block.block_hash().to_string();
-            let reward = subsidy(height);
+            let reward = subsidy(next_height);
             println!(
                 row_fmt!(),
-                height,
+                next_height,
                 short_hash(&block_hash),
                 format!("{reward}"),
                 block.header.nonce,

@@ -2,15 +2,6 @@
 //!
 //! Sends JSON-RPC requests to a running `bitaiird` and prints the
 //! response. Every subcommand maps 1:1 to an RPC method.
-//!
-//! Usage:
-//!
-//! ```text
-//! bitaiir-cli getblockchaininfo
-//! bitaiir-cli getblock 0
-//! bitaiir-cli getblock 5
-//! bitaiir-cli stop
-//! ```
 
 use clap::{Parser, Subcommand};
 use jsonrpsee::core::client::ClientT;
@@ -36,13 +27,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Show blockchain status: height, tip hash, UTXO count, next subsidy.
+    /// Show blockchain status.
     Getblockchaininfo,
     /// Show block details at a given height.
     Getblock {
         /// Block height (0 = genesis).
         height: u64,
     },
+    /// Generate a new BitAiir address in the wallet.
+    Getnewaddress,
+    /// Show the balance of an address.
+    Getbalance {
+        /// BitAiir address (aiir...).
+        address: String,
+    },
+    /// Send AIIR to an address.
+    Sendtoaddress {
+        /// Recipient BitAiir address (aiir...).
+        address: String,
+        /// Amount in AIIR (e.g. 10.5).
+        amount: f64,
+    },
+    /// Show the mempool status.
+    Getmempoolinfo,
     /// Ask the daemon to shut down gracefully.
     Stop,
 }
@@ -61,6 +68,18 @@ async fn main() {
     let result: Result<serde_json::Value, _> = match &cli.command {
         Commands::Getblockchaininfo => client.request("getblockchaininfo", rpc_params![]).await,
         Commands::Getblock { height } => client.request("getblock", rpc_params![*height]).await,
+        Commands::Getnewaddress => client.request("getnewaddress", rpc_params![]).await,
+        Commands::Getbalance { address } => {
+            client
+                .request("getbalance", rpc_params![address.clone()])
+                .await
+        }
+        Commands::Sendtoaddress { address, amount } => {
+            client
+                .request("sendtoaddress", rpc_params![address.clone(), *amount])
+                .await
+        }
+        Commands::Getmempoolinfo => client.request("getmempoolinfo", rpc_params![]).await,
         Commands::Stop => client.request("stop", rpc_params![]).await,
     };
 

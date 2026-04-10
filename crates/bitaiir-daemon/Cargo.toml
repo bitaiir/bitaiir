@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 bitaiir-chain = { workspace = true }
+bitaiir-crypto = { workspace = true }
 bitaiir-rpc = { workspace = true }
 bitaiir-types = { workspace = true }
 jsonrpsee = { workspace = true }

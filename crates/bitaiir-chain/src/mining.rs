@@ -159,7 +159,7 @@ pub fn create_test_genesis(
 ///   recomputed from the time the previous window took.
 /// - Between retarget boundaries, the previous block's `bits` is
 ///   carried forward.
-fn required_bits(chain: &Chain, height: u64) -> u32 {
+pub fn required_bits(chain: &Chain, height: u64) -> u32 {
     // The first window always uses the initial difficulty.
     if height < RETARGET_INTERVAL {
         return CompactTarget::INITIAL.to_bits();
@@ -338,6 +338,60 @@ fn max_user_txs_count() -> usize {
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
+
+/// Mine a block from pre-computed parameters, without needing a chain
+/// or mempool reference. This is the lock-friendly version used by the
+/// daemon: snapshot the chain state under a short lock, release the
+/// lock, then call this function (which is CPU-heavy and can run for
+/// seconds or minutes) without blocking RPC handlers.
+pub fn mine_block_from_params(
+    prev_block_hash: Hash256,
+    height: u64,
+    bits: u32,
+    user_txs: Vec<Transaction>,
+    miner_recipient_hash: [u8; 20],
+    network_time: u64,
+) -> Block {
+    let subsidy_amount = subsidy(height);
+    let total_fees = Amount::ZERO; // TODO: compute from UTXO lookups
+    let coinbase_amount = subsidy_amount
+        .checked_add(total_fees)
+        .unwrap_or(subsidy_amount);
+
+    let coinbase = build_coinbase(height, miner_recipient_hash, coinbase_amount);
+
+    let mut transactions = Vec::with_capacity(1 + user_txs.len());
+    transactions.push(coinbase);
+    transactions.extend(user_txs);
+
+    let merkle_root = {
+        let txids: Vec<Hash256> = transactions.iter().map(|tx| tx.txid()).collect();
+        bitaiir_types::merkle_root(&txids)
+    };
+
+    let mut header = BlockHeader {
+        version: 1,
+        prev_block_hash,
+        merkle_root,
+        timestamp: network_time,
+        bits,
+        nonce: 0,
+    };
+
+    let target = CompactTarget::from_bits(bits);
+    loop {
+        let pow_hash = aiir_pow(&header);
+        if target.hash_meets_target(pow_hash.as_bytes()) {
+            break;
+        }
+        header.nonce = header.nonce.wrapping_add(1);
+    }
+
+    Block {
+        header,
+        transactions,
+    }
+}
 
 #[cfg(test)]
 mod tests {
