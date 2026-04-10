@@ -172,6 +172,7 @@ dependencies = [
  "bitaiir-chain",
  "bitaiir-crypto",
  "bitaiir-rpc",
+ "bitaiir-storage",
  "bitaiir-types",
  "jsonrpsee",
  "tokio",
@@ -203,6 +204,13 @@ dependencies = [
 [[package]]
 name = "bitaiir-storage"
 version = "0.1.0"
+dependencies = [
+ "bitaiir-chain",
+ "bitaiir-crypto",
+ "bitaiir-types",
+ "redb",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "bitaiir-types"
@@ -1207,6 +1215,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
+]
+
+[[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

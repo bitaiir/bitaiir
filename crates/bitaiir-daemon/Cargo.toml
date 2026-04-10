@@ -18,6 +18,7 @@ path = "src/main.rs"
 bitaiir-chain = { workspace = true }
 bitaiir-crypto = { workspace = true }
 bitaiir-rpc = { workspace = true }
+bitaiir-storage = { workspace = true }
 bitaiir-types = { workspace = true }
 jsonrpsee = { workspace = true }
 tokio = { workspace = true }

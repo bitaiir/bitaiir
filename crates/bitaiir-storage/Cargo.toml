@@ -9,3 +9,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+bitaiir-chain = { workspace = true }
+bitaiir-crypto = { workspace = true }
+bitaiir-types = { workspace = true }
+redb = { workspace = true }
+thiserror = { workspace = true }

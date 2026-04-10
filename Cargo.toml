@@ -106,9 +106,10 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Pure-Rust embedded ACID key-value store for chain persistence.
+redb = "2"
+
 # --- Future external crates (uncomment when wiring them in) ---
-# Storage
-# redb = "2"
 #
 # Config files
 # toml = "0.8"

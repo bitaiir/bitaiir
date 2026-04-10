@@ -70,6 +70,11 @@ impl Wallet {
         addr_str
     }
 
+    /// Import an existing keypair (used when loading from storage).
+    pub fn import_key(&mut self, address: String, privkey: PrivateKey, pubkey: PublicKey) {
+        self.keys.insert(address, (privkey, pubkey));
+    }
+
     /// Look up a keypair by address.
     pub fn get_keys(&self, address: &str) -> Option<&(PrivateKey, PublicKey)> {
         self.keys.get(address)

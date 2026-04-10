@@ -1,20 +1,20 @@
 //! `bitaiird` — BitAiir Core daemon.
 //!
-//! Phase C2: an async daemon that mines blocks in a background thread
-//! and serves a JSON-RPC interface so `bitaiir-cli` (and any other
-//! tooling) can query the chain state.
+//! Mines blocks with Proof of Aiir (Argon2id), serves JSON-RPC, and
+//! persists the chain to disk via redb. On restart the chain resumes
+//! from where it left off — no re-mining the genesis.
 //!
 //! Usage:
-//!
 //! ```text
-//! cargo build --release --bin bitaiird
+//! cargo build --release --bin bitaiird --bin bitaiir-cli
+//! ./target/release/bitaiird          # mines + serves RPC
+//! ./target/release/bitaiir-cli getblockchaininfo
+//! ./target/release/bitaiir-cli stop  # graceful shutdown
+//! # restart — chain continues from disk
 //! ./target/release/bitaiird
-//!
-//! # In another terminal:
-//! cargo run --release --bin bitaiir-cli -- getblockchaininfo
-//! cargo run --release --bin bitaiir-cli -- stop
 //! ```
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -22,6 +22,8 @@ use std::time::Instant;
 use bitaiir_chain::{Chain, Mempool, UtxoSet, create_test_genesis, subsidy, validate_block};
 use bitaiir_crypto::hash::hash160;
 use bitaiir_rpc::{BitaiirApiServer, BitaiirRpcImpl, NodeState, SharedState, Wallet};
+use bitaiir_storage::Storage;
+use bitaiir_types::OutPoint;
 use jsonrpsee::server::ServerBuilder;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -29,6 +31,7 @@ use tracing::{info, warn};
 const GENESIS_MESSAGE: &str =
     "Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos";
 const RPC_ADDR: &str = "127.0.0.1:8443";
+const DATA_DIR: &str = "bitaiir_data";
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -46,58 +49,134 @@ fn short_hash(hex: &str) -> String {
 
 #[tokio::main]
 async fn main() {
-    // --- Logging --------------------------------------------------------- //
-
     tracing_subscriber::fmt()
         .with_target(false)
         .with_level(true)
         .init();
-
-    // --- Banner ---------------------------------------------------------- //
 
     println!();
     println!("  BitAiir Core v0.1.0");
     println!("  Proof of Aiir (SHA-256d + Argon2id)");
     println!("  Target block time: 5s | Retarget every 20 blocks");
     println!("  RPC server: http://{RPC_ADDR}");
+    println!("  Data dir:   {DATA_DIR}/");
     println!();
 
-    // --- Generate miner address ------------------------------------------ //
+    // --- Open storage ---------------------------------------------------- //
 
-    let mut wallet = Wallet::new();
-    let miner_address = wallet.generate_address();
-    let (_, miner_pubkey) = wallet.get_keys(&miner_address).unwrap().clone();
-    let miner_recipient_hash = hash160(&miner_pubkey.to_compressed());
+    let data_path = PathBuf::from(DATA_DIR);
+    let storage = Arc::new(Storage::open(&data_path).expect("failed to open storage"));
 
-    println!("  Miner address: {miner_address}");
-    println!();
+    // --- Load or create chain -------------------------------------------- //
 
-    // --- Genesis --------------------------------------------------------- //
+    let (chain, utxo, wallet, miner_recipient_hash) =
+        if storage.has_chain().expect("storage check failed") {
+            // Resume from disk.
+            println!("  Loading chain from disk...");
 
-    println!("  Mining genesis block...");
-    let genesis_start = Instant::now();
-    let genesis = create_test_genesis(miner_recipient_hash, unix_now(), GENESIS_MESSAGE);
-    let genesis_elapsed = genesis_start.elapsed();
+            let (tip_height, tip_hash) = storage
+                .load_chain_tip()
+                .expect("load tip")
+                .expect("has_chain was true");
 
-    let embedded_msg = String::from_utf8_lossy(&genesis.transactions[0].inputs[0].signature);
-    println!("  Genesis mined in {:.1}s", genesis_elapsed.as_secs_f64());
-    println!(
-        "  Hash:    {}",
-        short_hash(&genesis.block_hash().to_string())
-    );
-    println!("  Reward:  {}", subsidy(0));
-    println!("  Message: \"{}\"", embedded_msg);
-    println!();
+            // Rebuild Chain by replaying blocks in order.
+            let genesis = storage
+                .load_block_at(0)
+                .expect("load genesis")
+                .expect("genesis must exist");
+            let mut chain = Chain::with_genesis(genesis);
+
+            for h in 1..=tip_height {
+                let block = storage
+                    .load_block_at(h)
+                    .expect("load block")
+                    .unwrap_or_else(|| panic!("block at height {h} missing from storage"));
+                chain.push(block).expect("push stored block");
+            }
+
+            // Load UTXOs directly from storage.
+            let utxo_map = storage.load_all_utxos().expect("load utxos");
+            let mut utxo = UtxoSet::new();
+            for (outpoint, txout) in utxo_map {
+                utxo.insert(outpoint, txout);
+            }
+
+            // Load wallet keys.
+            let wallet_keys = storage.load_wallet_keys().expect("load wallet keys");
+            let mut wallet = Wallet::new();
+            // Re-populate wallet from stored keys.
+            for (addr, (privkey, pubkey)) in &wallet_keys {
+                wallet.import_key(addr.clone(), privkey.clone(), *pubkey);
+            }
+
+            // Use the first wallet address as the miner address.
+            let miner_hash = if let Some(addr) = wallet.addresses().first() {
+                let (_, pk) = wallet.get_keys(addr).unwrap();
+                hash160(&pk.to_compressed())
+            } else {
+                // No wallet keys stored — generate a new one.
+                let addr = wallet.generate_address();
+                let (privkey, pubkey) = wallet.get_keys(&addr).unwrap().clone();
+                storage
+                    .save_wallet_key(&addr, &privkey, &pubkey)
+                    .expect("save wallet key");
+                hash160(&pubkey.to_compressed())
+            };
+
+            println!(
+                "  Loaded: height={tip_height}, tip={}",
+                short_hash(&tip_hash.to_string())
+            );
+            println!("  UTXOs:  {}", utxo.len());
+            println!("  Wallet: {} address(es)", wallet.addresses().len());
+            println!();
+
+            (chain, utxo, wallet, miner_hash)
+        } else {
+            // Fresh start: generate miner address + mine genesis.
+            let mut wallet = Wallet::new();
+            let miner_address = wallet.generate_address();
+            let (privkey, pubkey) = wallet.get_keys(&miner_address).unwrap().clone();
+            let miner_hash = hash160(&pubkey.to_compressed());
+
+            // Persist the miner key immediately.
+            storage
+                .save_wallet_key(&miner_address, &privkey, &pubkey)
+                .expect("save miner wallet key");
+
+            println!("  Miner address: {miner_address}");
+            println!();
+            println!("  Mining genesis block...");
+            let t = Instant::now();
+            let genesis = create_test_genesis(miner_hash, unix_now(), GENESIS_MESSAGE);
+            println!("  Genesis mined in {:.1}s", t.elapsed().as_secs_f64());
+            println!(
+                "  Hash:    {}",
+                short_hash(&genesis.block_hash().to_string())
+            );
+            println!("  Reward:  {}", subsidy(0));
+            let msg = String::from_utf8_lossy(&genesis.transactions[0].inputs[0].signature);
+            println!("  Message: \"{msg}\"");
+            println!();
+
+            let mut utxo = UtxoSet::new();
+            for tx in &genesis.transactions {
+                utxo.apply_transaction(tx).unwrap();
+            }
+
+            // Persist genesis.
+            storage
+                .apply_block(0, &genesis, &[])
+                .expect("persist genesis");
+
+            let chain = Chain::with_genesis(genesis);
+            (chain, utxo, wallet, miner_hash)
+        };
 
     // --- Initialize shared state ----------------------------------------- //
 
-    let mut utxo = UtxoSet::new();
-    for tx in &genesis.transactions {
-        utxo.apply_transaction(tx).unwrap();
-    }
-
     let state: SharedState = Arc::new(RwLock::new(NodeState {
-        chain: Chain::with_genesis(genesis),
+        chain,
         utxo,
         mempool: Mempool::new(),
         wallet,
@@ -125,9 +204,9 @@ async fn main() {
     let mining_state = state.clone();
     let mining_shutdown = shutdown.clone();
     let mining_recipient = miner_recipient_hash;
+    let mining_storage = storage.clone();
 
     let mining_handle = tokio::task::spawn_blocking(move || {
-        // Table header (printed once).
         macro_rules! row_fmt {
             () => {
                 "  {:>6} | {:<15} | {:>20} | {:>6} | {:>6} | {:>5}"
@@ -142,10 +221,7 @@ async fn main() {
         while !mining_shutdown.load(Ordering::Relaxed) {
             let timestamp = unix_now();
 
-            // Step 1: Snapshot chain state under a SHORT write lock.
-            // This takes the mempool transactions and the chain
-            // parameters needed for mining, then releases the lock
-            // immediately so RPC handlers are not blocked.
+            // Snapshot (short write lock).
             let (prev_hash, next_height, bits, user_txs) = {
                 let mut s = mining_state.blocking_write();
                 let h = s.chain.height() + 1;
@@ -154,10 +230,8 @@ async fn main() {
                 let txs = s.mempool.take_for_block(2000);
                 (tip, h, b, txs)
             };
-            // Lock is released here — RPC is fully available during mining.
 
-            // Step 2: Mine (CPU-heavy, NO lock held). This is where
-            // Argon2id runs for potentially seconds per attempt.
+            // Mine (NO lock held).
             let start = Instant::now();
             let block = bitaiir_chain::mine_block_from_params(
                 prev_hash,
@@ -169,13 +243,22 @@ async fn main() {
             );
             let elapsed = start.elapsed();
 
-            // Step 3: Validate and commit under a SHORT write lock.
+            // Validate, commit, and persist (short write lock).
             {
                 let mut s = mining_state.blocking_write();
                 if let Err(e) = validate_block(&block, &s.chain, &s.utxo, timestamp + 1) {
                     warn!("self-mined block failed validation: {e}");
                     continue;
                 }
+
+                // Collect spent outpoints for storage.
+                let spent: Vec<OutPoint> = block
+                    .transactions
+                    .iter()
+                    .skip(1)
+                    .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
+                    .collect();
+
                 if let Err(e) = s.chain.push(block.clone()) {
                     warn!("self-mined block failed push: {e}");
                     continue;
@@ -183,15 +266,18 @@ async fn main() {
                 for tx in &block.transactions {
                     s.utxo.apply_transaction(tx).unwrap();
                 }
+
+                // Persist to disk.
+                if let Err(e) = mining_storage.apply_block(next_height, &block, &spent) {
+                    warn!("failed to persist block {next_height}: {e}");
+                }
             }
 
-            // Print progress (state is unlocked now).
-            let block_hash = block.block_hash().to_string();
             let reward = subsidy(next_height);
             println!(
                 row_fmt!(),
                 next_height,
-                short_hash(&block_hash),
+                short_hash(&block.block_hash().to_string()),
                 format!("{reward}"),
                 block.header.nonce,
                 format!("{:.1}s", elapsed.as_secs_f64()),
@@ -207,8 +293,6 @@ async fn main() {
 
     // --- Wait for shutdown ----------------------------------------------- //
 
-    // Poll the shutdown flag. When `stop` RPC is called, the flag is
-    // set and we break out.
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         if shutdown.load(Ordering::Relaxed) {
@@ -218,7 +302,6 @@ async fn main() {
 
     info!("Shutting down...");
     rpc_handle.stop().expect("rpc handle stop");
-    // The mining thread will observe the shutdown flag and exit.
     let _ = mining_handle.await;
     info!("Goodbye.");
 }
