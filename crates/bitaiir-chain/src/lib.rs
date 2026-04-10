@@ -46,11 +46,14 @@
 #![forbid(unsafe_code)]
 
 pub mod chain;
+pub mod consensus;
 pub mod error;
 pub mod mempool;
+pub mod pow;
 pub mod subsidy;
 pub mod target;
 pub mod utxo;
+pub mod validation;
 
 #[cfg(test)]
 mod test_util;
@@ -58,6 +61,8 @@ mod test_util;
 pub use chain::Chain;
 pub use error::{Error, Result};
 pub use mempool::Mempool;
+pub use pow::aiir_pow;
 pub use subsidy::{BLOCKS_PER_HALVING, INITIAL_SUBSIDY, TAIL_EMISSION, subsidy};
 pub use target::CompactTarget;
 pub use utxo::UtxoSet;
+pub use validation::{validate_block, validate_transaction};
