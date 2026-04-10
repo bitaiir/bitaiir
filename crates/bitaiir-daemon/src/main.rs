@@ -24,7 +24,7 @@ const MINER_RECIPIENT: [u8; 20] = [0x42; 20];
 /// embedding a headline or marker string to prove the block's creation
 /// date and document the project's intent.
 const GENESIS_MESSAGE: &str =
-    "BitAiir/10-Apr-2026/The beginning of a new decentralized payment system";
+    "Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos";
 
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -71,11 +71,22 @@ fn main() {
 
     // --- Mining loop ----------------------------------------------------- //
 
+    // Table format: all columns use a fixed width. The format string
+    // is shared between the header row and every data row so the
+    // columns are guaranteed to line up regardless of content width.
+    //
+    // Layout: "  HEIGHT | HASH            | REWARD               | NONCE  | TIME   | UTXOS"
+    macro_rules! row_fmt {
+        () => {
+            "  {:>6} | {:<15} | {:>20} | {:>6} | {:>6} | {:>5}"
+        };
+    }
+
     println!(
-        "  {:<7} | {:<15} | {:<22} | {:>6} | {:>7} | {:>5}",
+        row_fmt!(),
         "Height", "Hash", "Reward", "Nonce", "Time", "UTXOs",
     );
-    println!("  {}", "-".repeat(78));
+    println!("  {}", "-".repeat(74));
 
     loop {
         let height = chain.height() + 1;
@@ -98,16 +109,14 @@ fn main() {
             utxo.apply_transaction(tx).unwrap();
         }
 
-        // Print progress.
-        let block_hash = block.block_hash().to_string();
-        let reward = subsidy(height);
+        // Print progress using the same format as the header row.
         println!(
-            "  {:<7} | {:<15} | {:<22} | {:>6} | {:>6.1}s | {:>5}",
+            row_fmt!(),
             height,
-            short_hash(&block_hash),
-            reward,
+            short_hash(&block.block_hash().to_string()),
+            format!("{}", subsidy(height)),
             block.header.nonce,
-            elapsed.as_secs_f64(),
+            format!("{:.1}s", elapsed.as_secs_f64()),
             utxo.len(),
         );
     }
