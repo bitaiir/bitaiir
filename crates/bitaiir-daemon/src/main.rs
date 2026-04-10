@@ -19,6 +19,13 @@ use bitaiir_chain::{
 /// come from the wallet or from a `--address` CLI flag.
 const MINER_RECIPIENT: [u8; 20] = [0x42; 20];
 
+/// The message embedded in the genesis block's coinbase transaction,
+/// permanently recorded on-chain. Follows Bitcoin's tradition of
+/// embedding a headline or marker string to prove the block's creation
+/// date and document the project's intent.
+const GENESIS_MESSAGE: &str =
+    "BitAiir/10-Apr-2026/The beginning of a new decentralized payment system";
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -39,13 +46,17 @@ fn main() {
 
     println!("  Mining genesis block...");
     let genesis_start = Instant::now();
-    let genesis = create_test_genesis(MINER_RECIPIENT, unix_now());
+    let genesis = create_test_genesis(MINER_RECIPIENT, unix_now(), GENESIS_MESSAGE);
     let genesis_elapsed = genesis_start.elapsed();
     let genesis_hash = genesis.block_hash();
 
-    println!("  Genesis mined in {:.1}s", genesis_elapsed.as_secs_f64(),);
-    println!("  Hash:   {}", short_hash(&genesis_hash.to_string()));
-    println!("  Reward: {}", subsidy(0),);
+    // Extract the coinbase message back from the genesis to display it.
+    let embedded_msg = String::from_utf8_lossy(&genesis.transactions[0].inputs[0].signature);
+
+    println!("  Genesis mined in {:.1}s", genesis_elapsed.as_secs_f64());
+    println!("  Hash:    {}", short_hash(&genesis_hash.to_string()));
+    println!("  Reward:  {}", subsidy(0));
+    println!("  Message: \"{}\"", embedded_msg);
     println!();
 
     // --- Initialize state ------------------------------------------------ //
@@ -61,10 +72,10 @@ fn main() {
     // --- Mining loop ----------------------------------------------------- //
 
     println!(
-        "  {:>7}  {:>14}  {:>22}  {:>8}  {:>7}  {:>5}",
+        "  {:<7} | {:<15} | {:<22} | {:>6} | {:>7} | {:>5}",
         "Height", "Hash", "Reward", "Nonce", "Time", "UTXOs",
     );
-    println!("  {}", "-".repeat(72));
+    println!("  {}", "-".repeat(78));
 
     loop {
         let height = chain.height() + 1;
@@ -91,7 +102,7 @@ fn main() {
         let block_hash = block.block_hash().to_string();
         let reward = subsidy(height);
         println!(
-            "  {:>7}  {}  {:>22}  {:>8}  {:>6.1}s  {:>5}",
+            "  {:<7} | {:<15} | {:<22} | {:>6} | {:>6.1}s | {:>5}",
             height,
             short_hash(&block_hash),
             reward,

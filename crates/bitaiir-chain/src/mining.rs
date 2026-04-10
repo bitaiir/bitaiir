@@ -107,9 +107,19 @@ pub fn mine_block(
 /// Create a test genesis block for development. In production the
 /// genesis is hardcoded; this helper exists for tests and for the
 /// daemon's first-run bootstrap.
-pub fn create_test_genesis(miner_recipient_hash: [u8; 20], timestamp: u64) -> Block {
+///
+/// `coinbase_message` is embedded in the coinbase transaction's
+/// `signature` field (the "extra nonce" slot), mirroring Bitcoin's
+/// genesis block tradition of including a headline or marker string
+/// so the block's creation date and intent are permanently recorded
+/// in the chain.
+pub fn create_test_genesis(
+    miner_recipient_hash: [u8; 20],
+    timestamp: u64,
+    coinbase_message: &str,
+) -> Block {
     let coinbase_amount = subsidy(0);
-    let coinbase = build_coinbase(0, miner_recipient_hash, coinbase_amount);
+    let coinbase = build_genesis_coinbase(miner_recipient_hash, coinbase_amount, coinbase_message);
     let merkle_root = coinbase.txid();
     let bits = CompactTarget::INITIAL.to_bits();
 
@@ -296,6 +306,26 @@ fn build_coinbase(height: u64, recipient_hash: [u8; 20], amount: Amount) -> Tran
     }
 }
 
+/// Build the genesis coinbase with a human-readable message embedded
+/// in the signature field, like Bitcoin's famous headline.
+fn build_genesis_coinbase(recipient_hash: [u8; 20], amount: Amount, message: &str) -> Transaction {
+    Transaction {
+        version: 1,
+        inputs: vec![TxIn {
+            prev_out: OutPoint::NULL,
+            signature: message.as_bytes().to_vec(),
+            pubkey: Vec::new(),
+            sequence: u32::MAX,
+        }],
+        outputs: vec![TxOut {
+            amount,
+            recipient_hash,
+        }],
+        locktime: 0,
+        pow_nonce: 0,
+    }
+}
+
 /// How many non-coinbase transactions fit in a block. A rough
 /// estimate: `MAX_BLOCK_SIZE` bytes minus some overhead for the
 /// header and coinbase, divided by an assumed average tx size.
@@ -321,7 +351,7 @@ mod tests {
 
     #[test]
     fn mine_genesis_produces_valid_block() {
-        let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000);
+        let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000, "test genesis");
         assert!(genesis.transactions[0].is_coinbase());
         assert_eq!(genesis.header.prev_block_hash, Hash256::ZERO);
 
@@ -333,7 +363,7 @@ mod tests {
 
     #[test]
     fn mine_block_extends_chain() {
-        let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000);
+        let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000, "test genesis");
         let chain = Chain::with_genesis(genesis.clone());
         let mut mempool = Mempool::new();
 
@@ -354,7 +384,7 @@ mod tests {
         // transactions to the UTXO set. At the end, the chain has
         // 11 blocks (genesis + 10) and the UTXO set has 11 coinbase
         // outputs.
-        let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000);
+        let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000, "test genesis");
         let mut chain = Chain::with_genesis(genesis.clone());
         let mut utxo = UtxoSet::new();
         let mut mempool = Mempool::new();
@@ -404,7 +434,7 @@ mod tests {
 
     #[test]
     fn required_bits_uses_initial_for_first_window() {
-        let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000);
+        let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000, "test genesis");
         let chain = Chain::with_genesis(genesis);
 
         // Every height in the first retarget window should use
