@@ -406,7 +406,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         if active {
             Ok("Mining started.".to_string())
         } else {
-            Ok("Mining stopped.".to_string())
+            Ok("Mining stopping after current block...".to_string())
         }
     }
 

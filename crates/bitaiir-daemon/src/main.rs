@@ -470,6 +470,17 @@ async fn main() {
             } else {
                 println!("{line}");
             }
+
+            // If mining was turned off while we were grinding this
+            // block, emit the "stopped" message AFTER the block log
+            // so the order in the TUI makes sense.
+            if !mining_active_ref.load(Ordering::Relaxed) {
+                if is_interactive {
+                    let _ = log_tx.send("  Mining stopped.".into());
+                    let _ = log_tx.send(String::new());
+                }
+                header_printed = false;
+            }
         }
 
         info!("Mining thread exiting.");
