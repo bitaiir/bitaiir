@@ -11,8 +11,10 @@ repository.workspace = true
 [dependencies]
 bitaiir-chain = { workspace = true }
 bitaiir-crypto = { workspace = true }
+bitaiir-storage = { workspace = true }
 bitaiir-types = { workspace = true }
 jsonrpsee = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }

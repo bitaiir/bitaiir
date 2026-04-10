@@ -14,6 +14,7 @@ use bitaiir_chain::{Chain, Mempool, UtxoSet, subsidy, validate_transaction};
 use bitaiir_crypto::address::Address;
 use bitaiir_crypto::hash::hash160;
 use bitaiir_crypto::key::{PrivateKey, PublicKey};
+use bitaiir_storage::Storage;
 use bitaiir_types::{Amount, OutPoint, Transaction, TxIn, TxOut};
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::core::async_trait;
@@ -177,6 +178,7 @@ pub struct BlockchainInfo {
 pub struct BitaiirRpcImpl {
     pub state: SharedState,
     pub shutdown: Arc<AtomicBool>,
+    pub storage: Arc<Storage>,
 }
 
 #[async_trait]
@@ -229,6 +231,11 @@ impl BitaiirApiServer for BitaiirRpcImpl {
     async fn get_new_address(&self) -> RpcResult<String> {
         let mut state = self.state.write().await;
         let address = state.wallet.generate_address();
+        // Persist the new key to disk so it survives restarts.
+        let (privkey, pubkey) = state.wallet.get_keys(&address).unwrap().clone();
+        if let Err(e) = self.storage.save_wallet_key(&address, &privkey, &pubkey) {
+            tracing::warn!("failed to persist wallet key: {e}");
+        }
         Ok(address)
     }
 

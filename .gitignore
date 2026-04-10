@@ -141,3 +141,6 @@ dmypy.json
 /target/
 **/*.rs.bk
 *.pdb
+
+# BitAiir data directory (blockchain database, wallet keys)
+bitaiir_data/

@@ -189,6 +189,7 @@ async fn main() {
     let rpc_impl = BitaiirRpcImpl {
         state: state.clone(),
         shutdown: shutdown.clone(),
+        storage: storage.clone(),
     };
 
     let server = ServerBuilder::default()
