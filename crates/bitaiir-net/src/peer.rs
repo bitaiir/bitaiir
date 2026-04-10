@@ -153,6 +153,14 @@ impl Peer {
         info!("handshake complete with {}", self.address);
         Ok(their_version)
     }
+
+    /// Consume this peer and return the raw halves plus the address.
+    /// Used when the connection must be kept alive beyond the
+    /// handshake (e.g., for tx gossip). The caller takes ownership of
+    /// both halves and manages the lifecycle.
+    pub fn into_parts(self) -> (OwnedReadHalf, OwnedWriteHalf, std::net::SocketAddr) {
+        (self.reader, self.writer, self.address)
+    }
 }
 
 fn build_version(best_height: u64) -> VersionMessage {

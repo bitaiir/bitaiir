@@ -202,6 +202,7 @@ async fn main() {
         utxo,
         mempool: Mempool::new(),
         wallet,
+        peer_senders: Vec::new(),
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -291,6 +292,19 @@ async fn main() {
                                         start_height + 1,
                                         tip
                                     );
+                                }
+                                Ok(NetMessage::TxData(bytes)) => {
+                                    if let Ok(tx) = bitaiir_types::encoding::from_bytes::<
+                                        bitaiir_types::Transaction,
+                                    >(&bytes)
+                                    {
+                                        let txid = tx.txid();
+                                        let mut s = state.write().await;
+                                        if !s.mempool.contains(&txid) {
+                                            s.mempool.add(tx);
+                                            info!("received tx {txid} from inbound peer {addr}");
+                                        }
+                                    }
                                 }
                                 Ok(NetMessage::Ping(nonce)) => {
                                     let _ = peer.send(&NetMessage::Pong(nonce)).await;

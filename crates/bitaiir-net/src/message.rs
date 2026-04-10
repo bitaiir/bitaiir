@@ -21,6 +21,8 @@ pub enum NetMessage {
     BlockData(Vec<u8>),
     /// Signals the end of a block sync stream.
     SyncDone,
+    /// A serialized transaction for mempool gossip.
+    TxData(Vec<u8>),
 }
 
 /// Payload of the `version` message.
@@ -49,6 +51,7 @@ impl NetMessage {
             NetMessage::GetBlocks(_) => "getblocks",
             NetMessage::BlockData(_) => "block",
             NetMessage::SyncDone => "syncdone",
+            NetMessage::TxData(_) => "tx",
         }
     }
 
@@ -73,6 +76,7 @@ impl NetMessage {
             NetMessage::GetBlocks(start) => start.to_le_bytes().to_vec(),
             NetMessage::BlockData(bytes) => bytes.clone(),
             NetMessage::SyncDone => Vec::new(),
+            NetMessage::TxData(bytes) => bytes.clone(),
         }
     }
 
@@ -116,6 +120,7 @@ impl NetMessage {
             }
             "block" => Some(NetMessage::BlockData(payload.to_vec())),
             "syncdone" => Some(NetMessage::SyncDone),
+            "tx" => Some(NetMessage::TxData(payload.to_vec())),
             _ => None,
         }
     }

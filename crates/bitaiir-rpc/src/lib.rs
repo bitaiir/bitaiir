@@ -32,6 +32,8 @@ pub struct NodeState {
     pub utxo: UtxoSet,
     pub mempool: Mempool,
     pub wallet: Wallet,
+    /// Channels to send messages to connected peers (for tx gossip).
+    pub peer_senders: Vec<tokio::sync::mpsc::Sender<bitaiir_net::NetMessage>>,
 }
 
 /// Thread-safe handle to the node state.
@@ -366,6 +368,14 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         }
 
         let txid = tx.txid();
+
+        // Broadcast tx to all connected peers before adding to local mempool.
+        let tx_bytes = bitaiir_types::encoding::to_bytes(&tx).expect("Transaction always encodes");
+        for sender in &state.peer_senders {
+            let _ = sender.try_send(bitaiir_net::NetMessage::TxData(tx_bytes.clone()));
+        }
+        let peers_notified = state.peer_senders.len();
+
         state.mempool.add(tx);
 
         Ok(serde_json::json!({
@@ -374,6 +384,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             "to": to_address,
             "amount": format!("{}", Amount::from_atomic(amount_atoms)),
             "change": format!("{}", Amount::from_atomic(change)),
+            "peers_notified": peers_notified,
             "status": "added to mempool",
         }))
     }
@@ -507,6 +518,84 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             state.chain.height()
         };
 
+        // Keep the peer connection alive for tx gossip. Split into
+        // reader/writer, spawn a background task that multiplexes
+        // incoming messages with outgoing tx broadcasts.
+        let (reader, writer, peer_addr) = peer.into_parts();
+        let (tx_send, mut tx_recv) = tokio::sync::mpsc::channel::<bitaiir_net::NetMessage>(100);
+
+        // Register this peer's sender channel in the shared state.
+        {
+            let mut state = self.state.write().await;
+            state.peer_senders.push(tx_send);
+        }
+
+        let gossip_state = self.state.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let mut reader = reader;
+            let mut writer = writer;
+
+            loop {
+                tokio::select! {
+                    // Outgoing: forward tx broadcasts from sendtoaddress
+                    msg = tx_recv.recv() => {
+                        match msg {
+                            Some(m) => {
+                                let payload = m.to_payload();
+                                let frame = bitaiir_net::protocol::frame_message(m.command(), &payload);
+                                if writer.write_all(&frame).await.is_err() {
+                                    break;
+                                }
+                                let _ = writer.flush().await;
+                            }
+                            None => break, // channel closed
+                        }
+                    }
+                    // Incoming: read messages from the peer
+                    result = async {
+                        let mut header_buf = [0u8; bitaiir_net::protocol::HEADER_SIZE];
+                        reader.read_exact(&mut header_buf).await?;
+                        let header = bitaiir_net::protocol::parse_header(&header_buf)
+                            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad magic"))?;
+                        let mut payload = vec![0u8; header.payload_len as usize];
+                        if !payload.is_empty() {
+                            reader.read_exact(&mut payload).await?;
+                        }
+                        Ok::<_, std::io::Error>(
+                            bitaiir_net::NetMessage::from_payload(&header.command, &payload)
+                        )
+                    } => {
+                        match result {
+                            Ok(Some(bitaiir_net::NetMessage::TxData(bytes))) => {
+                                if let Ok(tx) = bitaiir_types::encoding::from_bytes::<bitaiir_types::Transaction>(&bytes) {
+                                    let txid = tx.txid();
+                                    let mut s = gossip_state.write().await;
+                                    if !s.mempool.contains(&txid) {
+                                        s.mempool.add(tx);
+                                        tracing::info!("received tx {txid} from peer {peer_addr}");
+                                    }
+                                }
+                            }
+                            Ok(Some(bitaiir_net::NetMessage::Ping(n))) => {
+                                let pong = bitaiir_net::NetMessage::Pong(n);
+                                let payload = pong.to_payload();
+                                let frame = bitaiir_net::protocol::frame_message(pong.command(), &payload);
+                                let _ = writer.write_all(&frame).await;
+                                let _ = writer.flush().await;
+                            }
+                            Ok(_) => {} // ignore other messages
+                            Err(_) => {
+                                tracing::info!("peer {peer_addr} disconnected (gossip)");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(serde_json::json!({
             "peer": addr,
             "user_agent": their_version.user_agent,
@@ -514,7 +603,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             "protocol_version": their_version.protocol_version,
             "synced_blocks": synced_blocks,
             "new_height": new_height,
-            "status": if synced_blocks > 0 { "connected and synced" } else { "connected" },
+            "status": if synced_blocks > 0 { "connected, synced, gossiping" } else { "connected, gossiping" },
         }))
     }
 
