@@ -445,7 +445,7 @@ mod tests {
 
         // Apply genesis transactions to the UTXO set.
         for tx in &genesis.transactions {
-            utxo.apply_transaction(tx).unwrap();
+            utxo.apply_transaction(tx, 0).unwrap();
         }
 
         for i in 1..=10u64 {
@@ -465,7 +465,7 @@ mod tests {
 
             // Apply transactions to the UTXO set.
             for tx in &block.transactions {
-                utxo.apply_transaction(tx).unwrap();
+                utxo.apply_transaction(tx, 0).unwrap();
             }
         }
 

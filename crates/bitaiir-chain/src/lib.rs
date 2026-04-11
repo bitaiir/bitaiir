@@ -48,6 +48,7 @@
 pub mod chain;
 pub mod consensus;
 pub mod error;
+pub mod genesis;
 pub mod mempool;
 pub mod mining;
 pub mod pow;
@@ -62,6 +63,7 @@ mod test_util;
 
 pub use chain::Chain;
 pub use error::{Error, Result};
+pub use genesis::mine_genesis;
 pub use mempool::Mempool;
 pub use mining::{create_test_genesis, mine_block, mine_block_from_params, required_bits};
 pub use pow::aiir_pow;

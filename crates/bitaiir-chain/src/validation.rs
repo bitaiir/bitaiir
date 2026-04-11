@@ -62,7 +62,11 @@ use crate::utxo::UtxoSet;
 ///
 /// - Anti-spam `pow_nonce` (Phase 3).
 /// - Coinbase maturity of the spent outputs.
-pub fn validate_transaction(tx: &Transaction, utxo_set: &UtxoSet) -> Result<()> {
+pub fn validate_transaction(
+    tx: &Transaction,
+    utxo_set: &UtxoSet,
+    current_height: u64,
+) -> Result<()> {
     // Rule: must have inputs and outputs.
     if tx.inputs.is_empty() {
         return Err(Error::NoInputs);
@@ -102,6 +106,18 @@ pub fn validate_transaction(tx: &Transaction, utxo_set: &UtxoSet) -> Result<()> 
         let utxo = utxo_set
             .get(&input.prev_out)
             .ok_or(Error::UnknownInput(input.prev_out))?;
+
+        // Check coinbase maturity (protocol §6.5).
+        if let Some(cb_height) = utxo_set.coinbase_height(&input.prev_out) {
+            if current_height < cb_height + crate::consensus::COINBASE_MATURITY {
+                return Err(Error::ImmatureCoinbase {
+                    outpoint: input.prev_out,
+                    created_at: cb_height,
+                    current_height,
+                    maturity: crate::consensus::COINBASE_MATURITY,
+                });
+            }
+        }
 
         // Check that the pubkey hashes to the UTXO's recipient_hash.
         let pubkey_hash = hash160(&input.pubkey);
@@ -257,7 +273,7 @@ pub fn validate_block(
 
     // Rule 9: validate each non-coinbase transaction.
     for tx in block.transactions.iter().skip(1) {
-        validate_transaction(tx, utxo_set)?;
+        validate_transaction(tx, utxo_set, next_height)?;
     }
 
     // Rule 11: coinbase outputs ≤ subsidy + fees.
@@ -338,7 +354,7 @@ mod tests {
 
         let mut utxo = UtxoSet::new();
         for tx in &genesis.transactions {
-            utxo.apply_transaction(tx).unwrap();
+            utxo.apply_transaction(tx, 0).unwrap();
         }
 
         (chain, utxo)
@@ -631,7 +647,7 @@ mod tests {
         };
         // sample_normal_tx spends 50 AIIR (< 100 AIIR in the UTXO).
         let tx = sample_normal_tx(spend, 7);
-        validate_transaction(&tx, &utxo).expect("should be valid");
+        validate_transaction(&tx, &utxo, 100).expect("should be valid");
     }
 
     #[test]
@@ -652,7 +668,7 @@ mod tests {
         let sighash = tx.sighash();
         tx.inputs[0].signature = test_private_key().sign_digest(sighash.as_bytes());
         crate::tx_pow::mine_tx_pow(&mut tx);
-        let err = validate_transaction(&tx, &utxo).unwrap_err();
+        let err = validate_transaction(&tx, &utxo, 100).unwrap_err();
         assert!(matches!(err, Error::OutputsExceedInputs { .. }));
     }
 
@@ -668,7 +684,7 @@ mod tests {
         // Duplicate the single input, then re-mine PoW (structure changed).
         tx.inputs.push(tx.inputs[0].clone());
         crate::tx_pow::mine_tx_pow(&mut tx);
-        let err = validate_transaction(&tx, &utxo).unwrap_err();
+        let err = validate_transaction(&tx, &utxo, 100).unwrap_err();
         assert!(matches!(err, Error::DuplicateInput(_)));
     }
 
@@ -685,7 +701,7 @@ mod tests {
             locktime: 0,
             pow_nonce: 0,
         };
-        let err = validate_transaction(&tx, &utxo).unwrap_err();
+        let err = validate_transaction(&tx, &utxo, 100).unwrap_err();
         assert!(matches!(err, Error::NoInputs));
     }
 
@@ -709,7 +725,7 @@ mod tests {
             locktime: 0,
             pow_nonce: 7,
         };
-        let err = validate_transaction(&tx, &utxo).unwrap_err();
+        let err = validate_transaction(&tx, &utxo, 100).unwrap_err();
         assert!(matches!(err, Error::NoOutputs));
     }
 }

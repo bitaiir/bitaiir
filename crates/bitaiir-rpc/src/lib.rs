@@ -371,7 +371,8 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         bitaiir_chain::mine_tx_pow(&mut tx);
 
         // Validate the transaction against the UTXO set.
-        if let Err(e) = validate_transaction(&tx, &state.utxo) {
+        let current_height = state.chain.height();
+        if let Err(e) = validate_transaction(&tx, &state.utxo, current_height) {
             return Err(jsonrpsee::types::ErrorObjectOwned::owned(
                 -4,
                 format!("transaction validation failed: {e}"),
@@ -532,7 +533,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
                         state.chain.push(block.clone()).unwrap();
                         for tx in &block.transactions {
-                            state.utxo.apply_transaction(tx).unwrap();
+                            state.utxo.apply_transaction(tx, height).unwrap();
                         }
 
                         // Persist.
@@ -632,7 +633,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                                             .collect();
                                         if s.chain.push(block.clone()).is_ok() {
                                             for tx in &block.transactions {
-                                                let _ = s.utxo.apply_transaction(tx);
+                                                let _ = s.utxo.apply_transaction(tx, height);
                                             }
                                             if let Some(storage) = gossip_storage.as_ref() {
                                                 let _ = storage.apply_block(height, &block, &spent);

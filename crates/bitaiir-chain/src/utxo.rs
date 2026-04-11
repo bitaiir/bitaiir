@@ -32,6 +32,10 @@ use crate::error::{Error, Result};
 /// `OutPoint` (previous txid + vout) that identifies them.
 pub struct UtxoSet {
     utxos: HashMap<OutPoint, TxOut>,
+    /// For coinbase outputs only: records the block height at which
+    /// the output was created so we can enforce the 100-block
+    /// maturity rule (protocol §6.5).
+    coinbase_heights: HashMap<OutPoint, u64>,
 }
 
 impl UtxoSet {
@@ -39,6 +43,7 @@ impl UtxoSet {
     pub fn new() -> Self {
         Self {
             utxos: HashMap::new(),
+            coinbase_heights: HashMap::new(),
         }
     }
 
@@ -67,6 +72,12 @@ impl UtxoSet {
         self.utxos.iter()
     }
 
+    /// If the outpoint is a coinbase output, return the height at
+    /// which it was created. Returns `None` for non-coinbase outputs.
+    pub fn coinbase_height(&self, outpoint: &OutPoint) -> Option<u64> {
+        self.coinbase_heights.get(outpoint).copied()
+    }
+
     /// Insert an output directly, used for bootstrapping or tests.
     /// Returns the previous occupant, if any.
     pub fn insert(&mut self, outpoint: OutPoint, txout: TxOut) -> Option<TxOut> {
@@ -92,14 +103,15 @@ impl UtxoSet {
     /// Callers must run consensus validation before calling this
     /// method; this is a backstop for programming bugs, not a
     /// rollback-capable transactional API.
-    pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<()> {
-        // Remove each spent input. The coinbase transaction's single
-        // input has `prev_out == OutPoint::NULL`, which is never
-        // present in the UTXO set — skip it.
+    pub fn apply_transaction(&mut self, tx: &Transaction, height: u64) -> Result<()> {
+        let is_coinbase = tx.is_coinbase();
+
+        // Remove each spent input.
         for input in &tx.inputs {
             if input.prev_out == OutPoint::NULL {
                 continue;
             }
+            self.coinbase_heights.remove(&input.prev_out);
             if self.utxos.remove(&input.prev_out).is_none() {
                 return Err(Error::MissingOutpoint(input.prev_out));
             }
@@ -113,6 +125,9 @@ impl UtxoSet {
                 vout: vout as u32,
             };
             self.utxos.insert(outpoint, *txout);
+            if is_coinbase {
+                self.coinbase_heights.insert(outpoint, height);
+            }
         }
 
         Ok(())
@@ -177,7 +192,8 @@ mod tests {
         let expected_txid = coinbase.txid();
         let expected_len = coinbase.outputs.len();
 
-        set.apply_transaction(&coinbase).expect("coinbase applies");
+        set.apply_transaction(&coinbase, 0)
+            .expect("coinbase applies");
 
         assert_eq!(set.len(), expected_len);
         // Every coinbase output is now reachable by its (txid, vout).
@@ -196,7 +212,7 @@ mod tests {
         // Seed the set with one spendable UTXO: the coinbase output
         // from block 0.
         let coinbase = sample_coinbase(0);
-        set.apply_transaction(&coinbase).unwrap();
+        set.apply_transaction(&coinbase, 0).unwrap();
         let spend = OutPoint {
             txid: coinbase.txid(),
             vout: 0,
@@ -207,7 +223,8 @@ mod tests {
         let normal = sample_normal_tx(spend, 42);
         let normal_txid = normal.txid();
 
-        set.apply_transaction(&normal).expect("normal tx applies");
+        set.apply_transaction(&normal, 0)
+            .expect("normal tx applies");
 
         // The coinbase output is now spent.
         assert!(!set.contains(&spend));
@@ -229,7 +246,7 @@ mod tests {
         };
         let tx = sample_normal_tx(phantom, 1);
 
-        let err = set.apply_transaction(&tx).unwrap_err();
+        let err = set.apply_transaction(&tx, 0).unwrap_err();
         match err {
             Error::MissingOutpoint(op) => assert_eq!(op, phantom),
             other => panic!("unexpected error: {other:?}"),
@@ -242,7 +259,7 @@ mod tests {
         // something real to double-spend.
         let mut set = UtxoSet::new();
         let coinbase = sample_coinbase(0);
-        set.apply_transaction(&coinbase).unwrap();
+        set.apply_transaction(&coinbase, 0).unwrap();
 
         let spend = OutPoint {
             txid: coinbase.txid(),
@@ -250,8 +267,8 @@ mod tests {
         };
         let tx = sample_normal_tx(spend, 1);
 
-        set.apply_transaction(&tx).expect("first spend");
-        let err = set.apply_transaction(&tx).unwrap_err();
+        set.apply_transaction(&tx, 1).expect("first spend");
+        let err = set.apply_transaction(&tx, 0).unwrap_err();
         assert!(matches!(err, Error::MissingOutpoint(_)));
     }
 

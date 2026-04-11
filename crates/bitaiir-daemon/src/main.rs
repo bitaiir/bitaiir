@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use bitaiir_chain::{Chain, Mempool, UtxoSet, create_test_genesis, subsidy, validate_block};
+use bitaiir_chain::{Chain, Mempool, UtxoSet, mine_genesis, subsidy, validate_block};
 use bitaiir_crypto::hash::hash160;
 use bitaiir_net::Peer;
 use bitaiir_net::message::NetMessage;
@@ -33,9 +33,6 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 mod tui;
-
-const GENESIS_MESSAGE: &str =
-    "Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos";
 
 #[derive(Parser)]
 #[command(name = "bitaiird", about = "BitAiir Core daemon", version)]
@@ -169,41 +166,50 @@ async fn main() {
 
             (chain, utxo, wallet, miner_hash)
         } else {
-            // Fresh start: generate miner address + mine genesis.
-            let mut wallet = Wallet::new();
-            let miner_address = wallet.generate_address();
-            let (privkey, pubkey) = wallet.get_keys(&miner_address).unwrap().clone();
-            let miner_hash = hash160(&pubkey.to_compressed());
-
-            // Persist the miner key immediately.
-            storage
-                .save_wallet_key(&miner_address, &privkey, &pubkey)
-                .expect("save miner wallet key");
-
-            println!("  Miner address: {miner_address}");
-            println!();
-            println!("  Mining genesis block...");
+            // Fresh start: mine the deterministic genesis block.
+            // All nodes produce the exact same genesis (fixed timestamp,
+            // fixed message, burn address) so P2P sync works between
+            // nodes that never shared data.
+            if !args.interactive {
+                println!("  Mining genesis block (first start)...");
+            }
             let t = Instant::now();
-            let genesis = create_test_genesis(miner_hash, unix_now(), GENESIS_MESSAGE);
-            println!("  Genesis mined in {:.1}s", t.elapsed().as_secs_f64());
-            println!(
-                "  Hash:    {}",
-                short_hash(&genesis.block_hash().to_string())
-            );
-            println!("  Reward:  {}", subsidy(0));
-            let msg = String::from_utf8_lossy(&genesis.transactions[0].inputs[0].signature);
-            println!("  Message: \"{msg}\"");
-            println!();
+            let genesis = mine_genesis();
+            if !args.interactive {
+                println!("  Genesis mined in {:.1}s", t.elapsed().as_secs_f64());
+                println!(
+                    "  Hash:    {}",
+                    short_hash(&genesis.block_hash().to_string())
+                );
+                println!("  Reward:  {} (burn address, unspendable)", subsidy(0));
+                let msg = String::from_utf8_lossy(&genesis.transactions[0].inputs[0].signature);
+                println!("  Message: \"{msg}\"");
+                println!();
+            }
 
             let mut utxo = UtxoSet::new();
             for tx in &genesis.transactions {
-                utxo.apply_transaction(tx).unwrap();
+                utxo.apply_transaction(tx, 0).unwrap();
             }
 
             // Persist genesis.
             storage
                 .apply_block(0, &genesis, &[])
                 .expect("persist genesis");
+
+            // Generate a miner address in the wallet for block 1+.
+            let mut wallet = Wallet::new();
+            let miner_address = wallet.generate_address();
+            let (privkey, pubkey) = wallet.get_keys(&miner_address).unwrap().clone();
+            let miner_hash = hash160(&pubkey.to_compressed());
+            storage
+                .save_wallet_key(&miner_address, &privkey, &pubkey)
+                .expect("save miner wallet key");
+
+            if !args.interactive {
+                println!("  Miner address: {miner_address}");
+                println!();
+            }
 
             let chain = Chain::with_genesis(genesis);
             (chain, utxo, wallet, miner_hash)
@@ -441,7 +447,7 @@ async fn main() {
                     continue;
                 }
                 for tx in &block.transactions {
-                    s.utxo.apply_transaction(tx).unwrap();
+                    s.utxo.apply_transaction(tx, next_height).unwrap();
                 }
 
                 if let Err(e) = mining_storage.apply_block(next_height, &block, &spent) {

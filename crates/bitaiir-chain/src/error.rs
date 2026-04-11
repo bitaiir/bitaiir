@@ -105,6 +105,18 @@ pub enum Error {
     /// The transaction's anti-spam pow_nonce does not meet the target.
     #[error("invalid transaction proof of work (anti-spam nonce)")]
     InvalidTxPow,
+
+    /// A transaction tries to spend a coinbase output that has not
+    /// matured (less than 100 blocks old).
+    #[error(
+        "immature coinbase spend: outpoint {outpoint:?} created at height {created_at}, current height {current_height}, needs {maturity} blocks"
+    )]
+    ImmatureCoinbase {
+        outpoint: OutPoint,
+        created_at: u64,
+        current_height: u64,
+        maturity: u64,
+    },
 }
 
 /// Convenience alias.
