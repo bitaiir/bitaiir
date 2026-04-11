@@ -37,6 +37,15 @@ impl OutPoint {
     };
 }
 
+impl core::fmt::Display for OutPoint {
+    /// Human-friendly `{txid}:{vout}` format for error messages and
+    /// logs.  The txid is shown in full hex so the output can be fed
+    /// straight into `/getblock` or a block explorer.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}:{}", self.txid, self.vout)
+    }
+}
+
 /// An input to a transaction, spending a previous output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxIn {

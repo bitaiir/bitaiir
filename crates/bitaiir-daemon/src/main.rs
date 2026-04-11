@@ -535,8 +535,12 @@ async fn main() {
     let mining_recipient = miner_recipient_hash;
     let is_interactive = args.interactive;
     let mining_storage = storage.clone();
+    // Clone so the TUI (spawned below) can still use `log_tx` after
+    // the mining task takes ownership of its own clone.
+    let mining_log_tx = log_tx.clone();
 
     let mining_handle = tokio::task::spawn_blocking(move || {
+        let log_tx = mining_log_tx;
         let mut header_printed = false;
 
         macro_rules! row_fmt {
@@ -680,10 +684,11 @@ async fn main() {
     if args.interactive {
         let repl_rpc_addr = args.rpc_addr.clone();
         let repl_shutdown = shutdown.clone();
+        let repl_log_tx = log_tx.clone();
         let _ = tokio::task::spawn_blocking(move || {
             // Wait for RPC server to be ready.
             std::thread::sleep(std::time::Duration::from_millis(500));
-            if let Err(e) = tui::run_repl(&repl_rpc_addr, log_rx, repl_shutdown) {
+            if let Err(e) = tui::run_repl(&repl_rpc_addr, repl_log_tx, log_rx, repl_shutdown) {
                 eprintln!("REPL error: {e}");
             }
         })

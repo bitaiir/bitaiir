@@ -117,19 +117,10 @@ impl Wallet {
 
     /// Scan the UTXO set for outputs belonging to a given address
     /// and return the total balance in atomic units.
+    /// Total balance of `address`, including outputs that aren't yet
+    /// spendable (e.g. immature coinbases).  Use `spendable_balance_of`
+    /// instead when deciding what the user can actually send.
     pub fn balance_of(address: &str, utxo: &UtxoSet) -> u64 {
-        // Strip the "aiir" prefix to get the base58check body, then
-        // decode to get the recipient_hash. BUT it's simpler to just
-        // compute hash160 for every known address and scan.
-        // Since we have the pubkey, compute the recipient_hash directly.
-        // This is a O(n) scan of the UTXO set — fine for development.
-        //
-        // Actually, we need the recipient_hash from the address. The
-        // easiest approach: iterate all UTXOs and compare recipient_hash.
-        // We need a way to go from address -> recipient_hash. Let's
-        // compute it from the pubkey if we have it, or decode the address.
-
-        // For arbitrary addresses (not in our wallet), decode the address.
         let recipient_hash = match address_to_recipient_hash(address) {
             Some(h) => h,
             None => return 0,
@@ -140,6 +131,33 @@ impl Wallet {
             if txout.recipient_hash == recipient_hash {
                 total = total.saturating_add(txout.amount.to_atomic());
             }
+        }
+        total
+    }
+
+    /// Spendable balance of `address` at the given chain `tip_height`.
+    /// Excludes coinbase outputs that haven't reached
+    /// `COINBASE_MATURITY` confirmations — those are in the total
+    /// `balance_of` but can't be used as transaction inputs yet.
+    pub fn spendable_balance_of(address: &str, utxo: &UtxoSet, tip_height: u64) -> u64 {
+        let recipient_hash = match address_to_recipient_hash(address) {
+            Some(h) => h,
+            None => return 0,
+        };
+        let maturity = bitaiir_chain::consensus::COINBASE_MATURITY;
+
+        let mut total: u64 = 0;
+        for (outpoint, txout) in utxo.iter() {
+            if txout.recipient_hash != recipient_hash {
+                continue;
+            }
+            // Skip coinbases that haven't matured yet.
+            if let Some(cb_height) = utxo.coinbase_height(outpoint) {
+                if tip_height < cb_height + maturity {
+                    continue;
+                }
+            }
+            total = total.saturating_add(txout.amount.to_atomic());
         }
         total
     }
@@ -302,11 +320,15 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
     async fn get_balance(&self, address: String) -> RpcResult<serde_json::Value> {
         let state = self.state.read().await;
-        let balance_atoms = Wallet::balance_of(&address, &state.utxo);
+        let tip_height = state.chain.height();
+        let total = Wallet::balance_of(&address, &state.utxo);
+        let spendable = Wallet::spendable_balance_of(&address, &state.utxo, tip_height);
+        let immature = total.saturating_sub(spendable);
         Ok(serde_json::json!({
             "address": address,
-            "balance": format!("{}", Amount::from_atomic(balance_atoms)),
-            "balance_atomic": balance_atoms,
+            "total": format!("{}", Amount::from_atomic(total)),
+            "spendable": format!("{}", Amount::from_atomic(spendable)),
+            "immature": format!("{}", Amount::from_atomic(immature)),
         }))
     }
 
@@ -317,35 +339,6 @@ impl BitaiirApiServer for BitaiirRpcImpl {
     ) -> RpcResult<serde_json::Value> {
         let amount_atoms = (amount * 100_000_000.0) as u64;
 
-        let mut state = self.state.write().await;
-
-        // Find a wallet address with enough balance.
-        let addresses = state.wallet.addresses();
-        let mut from_address: Option<String> = None;
-        for addr in &addresses {
-            let bal = Wallet::balance_of(addr, &state.utxo);
-            if bal >= amount_atoms {
-                from_address = Some(addr.clone());
-                break;
-            }
-        }
-        let from_address = from_address.ok_or_else(|| {
-            jsonrpsee::types::ErrorObjectOwned::owned(
-                -2,
-                "insufficient balance in wallet",
-                None::<()>,
-            )
-        })?;
-
-        let (privkey, pubkey) = state
-            .wallet
-            .get_keys(&from_address)
-            .expect("address exists in wallet")
-            .clone();
-
-        let pubkey_bytes = pubkey.to_compressed();
-        let from_hash = hash160(&pubkey_bytes);
-
         let to_recipient_hash = address_to_recipient_hash(&to_address).ok_or_else(|| {
             jsonrpsee::types::ErrorObjectOwned::owned(
                 -3,
@@ -354,33 +347,94 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             )
         })?;
 
-        // Collect UTXOs from this address.
-        let mut inputs_total: u64 = 0;
-        let mut selected_utxos: Vec<(OutPoint, TxOut)> = Vec::new();
-        for (outpoint, txout) in state.utxo.iter() {
-            if txout.recipient_hash == from_hash {
+        // --- Phase 1: snapshot under a READ lock ------------------------ //
+        //
+        // Collect everything we need to build the transaction (keys,
+        // inputs, balances) and then drop the lock before running the
+        // ~2 s anti-spam PoW.  Holding the write lock across that work
+        // would freeze the mining thread and the TUI.
+        //
+        // UTXO selection skips immature coinbases — they pass the
+        // `recipient_hash` check but would be rejected by consensus
+        // rules downstream, so picking them here would make the
+        // transaction explode with a confusing error.
+        let (from_address, privkey, pubkey_bytes, from_hash, selected_utxos, inputs_total) = {
+            let state = self.state.read().await;
+            let tip_height = state.chain.height();
+            let maturity = bitaiir_chain::consensus::COINBASE_MATURITY;
+
+            // Find a wallet address with enough *spendable* balance.
+            let addresses = state.wallet.addresses();
+            let mut from_address: Option<String> = None;
+            for addr in &addresses {
+                let bal = Wallet::spendable_balance_of(addr, &state.utxo, tip_height);
+                if bal >= amount_atoms {
+                    from_address = Some(addr.clone());
+                    break;
+                }
+            }
+            let from_address = from_address.ok_or_else(|| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    -2,
+                    "insufficient spendable balance (immature coinbases don't count)",
+                    None::<()>,
+                )
+            })?;
+
+            let (privkey, pubkey) = state
+                .wallet
+                .get_keys(&from_address)
+                .expect("address exists in wallet")
+                .clone();
+
+            let pubkey_bytes = pubkey.to_compressed();
+            let from_hash = hash160(&pubkey_bytes);
+
+            // Collect mature UTXOs from this address.
+            let mut inputs_total: u64 = 0;
+            let mut selected_utxos: Vec<(OutPoint, TxOut)> = Vec::new();
+            for (outpoint, txout) in state.utxo.iter() {
+                if txout.recipient_hash != from_hash {
+                    continue;
+                }
+                // Skip immature coinbases — they can't be spent yet.
+                if let Some(cb_height) = state.utxo.coinbase_height(outpoint) {
+                    if tip_height < cb_height + maturity {
+                        continue;
+                    }
+                }
                 selected_utxos.push((*outpoint, *txout));
                 inputs_total = inputs_total.saturating_add(txout.amount.to_atomic());
                 if inputs_total >= amount_atoms {
                     break;
                 }
             }
-        }
 
-        if inputs_total < amount_atoms {
-            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
-                -2,
-                "insufficient balance after UTXO selection",
-                None::<()>,
-            ));
-        }
+            if inputs_total < amount_atoms {
+                return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                    -2,
+                    "insufficient spendable balance (immature coinbases don't count)",
+                    None::<()>,
+                ));
+            }
 
-        // Build transaction.
+            (
+                from_address,
+                privkey,
+                pubkey_bytes,
+                from_hash,
+                selected_utxos,
+                inputs_total,
+            )
+        };
+
+        // --- Phase 2: build + sign + mine PoW (NO lock) ----------------- //
+
+        // Build transaction outputs (recipient + change).
         let mut outputs = vec![TxOut {
             amount: Amount::from_atomic(amount_atoms),
             recipient_hash: to_recipient_hash,
         }];
-        // Change back to sender.
         let change = inputs_total - amount_atoms;
         if change > 0 {
             outputs.push(TxOut {
@@ -412,15 +466,32 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             input.signature = sig.clone();
         }
 
-        // Mine the anti-spam proof of work (protocol §6.7).
-        bitaiir_chain::mine_tx_pow(&mut tx);
+        // Mine the anti-spam PoW on the blocking thread pool so the
+        // Tokio reactor stays responsive while the CPU grinds.
+        let tx = tokio::task::spawn_blocking(move || {
+            bitaiir_chain::mine_tx_pow(&mut tx);
+            tx
+        })
+        .await
+        .map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -5,
+                format!("tx pow mining task failed: {e}"),
+                None::<()>,
+            )
+        })?;
 
-        // Validate the transaction against the UTXO set.
+        // --- Phase 3: re-validate + broadcast under WRITE lock ---------- //
+
+        let mut state = self.state.write().await;
+
+        // Re-validate: a block may have landed between phase 1 and
+        // here, so the UTXOs we picked might no longer exist.
         let current_height = state.chain.height();
         if let Err(e) = validate_transaction(&tx, &state.utxo, current_height) {
             return Err(jsonrpsee::types::ErrorObjectOwned::owned(
                 -4,
-                format!("transaction validation failed: {e}"),
+                e.to_string(),
                 None::<()>,
             ));
         }
@@ -458,14 +529,18 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
     async fn list_addresses(&self) -> RpcResult<serde_json::Value> {
         let state = self.state.read().await;
+        let tip_height = state.chain.height();
         let addresses = state.wallet.addresses();
         let mut result = Vec::new();
         for addr in &addresses {
-            let balance = Wallet::balance_of(addr, &state.utxo);
+            let total = Wallet::balance_of(addr, &state.utxo);
+            let spendable = Wallet::spendable_balance_of(addr, &state.utxo, tip_height);
+            let immature = total.saturating_sub(spendable);
             result.push(serde_json::json!({
                 "address": addr,
-                "balance": format!("{}", Amount::from_atomic(balance)),
-                "balance_atomic": balance,
+                "total": format!("{}", Amount::from_atomic(total)),
+                "spendable": format!("{}", Amount::from_atomic(spendable)),
+                "immature": format!("{}", Amount::from_atomic(immature)),
             }));
         }
         Ok(serde_json::json!({

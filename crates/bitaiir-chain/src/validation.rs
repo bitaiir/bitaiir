@@ -109,12 +109,16 @@ pub fn validate_transaction(
 
         // Check coinbase maturity (protocol §6.5).
         if let Some(cb_height) = utxo_set.coinbase_height(&input.prev_out) {
-            if current_height < cb_height + crate::consensus::COINBASE_MATURITY {
+            let maturity = crate::consensus::COINBASE_MATURITY;
+            if current_height < cb_height + maturity {
+                let confirmations = current_height.saturating_sub(cb_height);
+                let remaining = maturity.saturating_sub(confirmations);
                 return Err(Error::ImmatureCoinbase {
                     outpoint: input.prev_out,
                     created_at: cb_height,
                     current_height,
-                    maturity: crate::consensus::COINBASE_MATURITY,
+                    maturity,
+                    remaining,
                 });
             }
         }

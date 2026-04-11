@@ -25,7 +25,7 @@ pub enum Error {
 
     // --- UTXO set errors ------------------------------------------------- //
     /// A transaction tried to spend an outpoint not in the UTXO set.
-    #[error("utxo set is missing the outpoint being spent: {0:?}")]
+    #[error("utxo set is missing the outpoint being spent: {0}")]
     MissingOutpoint(OutPoint),
 
     // --- Block validation errors (protocol §7.4) ------------------------- //
@@ -83,11 +83,11 @@ pub enum Error {
     NoOutputs,
 
     /// An input references a non-existent UTXO.
-    #[error("input spends unknown outpoint {0:?}")]
+    #[error("input spends unknown outpoint {0}")]
     UnknownInput(OutPoint),
 
     /// Two inputs reference the same outpoint.
-    #[error("duplicate input: outpoint {0:?} appears more than once")]
+    #[error("duplicate input: outpoint {0} appears more than once")]
     DuplicateInput(OutPoint),
 
     /// Sum of outputs exceeds sum of inputs (money creation).
@@ -95,11 +95,11 @@ pub enum Error {
     OutputsExceedInputs { inputs: u64, outputs: u64 },
 
     /// The pubkey in a TxIn does not hash to the UTXO's recipient_hash.
-    #[error("pubkey hash mismatch for outpoint {0:?}")]
+    #[error("pubkey hash mismatch for outpoint {0}")]
     PubkeyMismatch(OutPoint),
 
     /// The ECDSA signature in a TxIn is invalid.
-    #[error("invalid signature for outpoint {0:?}")]
+    #[error("invalid signature for outpoint {0}")]
     InvalidInputSignature(OutPoint),
 
     /// The transaction's anti-spam pow_nonce does not meet the target.
@@ -107,15 +107,16 @@ pub enum Error {
     InvalidTxPow,
 
     /// A transaction tries to spend a coinbase output that has not
-    /// matured (less than 100 blocks old).
-    #[error(
-        "immature coinbase spend: outpoint {outpoint:?} created at height {created_at}, current height {current_height}, needs {maturity} blocks"
-    )]
+    /// matured (less than 100 blocks old).  The message shows where
+    /// the coinbase came from and exactly how many more confirmations
+    /// are needed, so the user can gauge how long to wait.
+    #[error("coinbase from block {created_at} needs {remaining} more confirmations")]
     ImmatureCoinbase {
         outpoint: OutPoint,
         created_at: u64,
         current_height: u64,
         maturity: u64,
+        remaining: u64,
     },
 }
 

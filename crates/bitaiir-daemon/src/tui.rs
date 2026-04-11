@@ -991,6 +991,7 @@ fn handle_mouse_up(app: &mut App) {
 
 pub fn run_repl(
     rpc_addr: &str,
+    log_tx: std::sync::mpsc::Sender<String>,
     log_rx: Receiver<String>,
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<()> {
@@ -1031,6 +1032,12 @@ pub fn run_repl(
 
     let outcome = (|| -> io::Result<()> {
         loop {
+            // Exit if some other code path (e.g. async `/stop`) has
+            // flipped the shutdown flag.
+            if shutdown.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
             // Drain mining / system messages.
             while let Ok(msg) = log_rx.try_recv() {
                 app.push_log(msg);
@@ -1045,7 +1052,7 @@ pub fn run_repl(
                             app.selection.clear();
                             app.mark_full();
                         }
-                        if handle_key(key, &mut app, &rt, &client, &shutdown)? {
+                        if handle_key(key, &mut app, &rt, &client, &log_tx, &shutdown)? {
                             return Ok(());
                         }
                     }
@@ -1122,7 +1129,8 @@ fn handle_key(
     app: &mut App,
     rt: &tokio::runtime::Handle,
     client: &jsonrpsee::http_client::HttpClient,
-    shutdown: &AtomicBool,
+    log_tx: &std::sync::mpsc::Sender<String>,
+    shutdown: &Arc<AtomicBool>,
 ) -> io::Result<bool> {
     match key.code {
         // --- Autocomplete ---------------------------------------------- //
@@ -1198,15 +1206,12 @@ fn handle_key(
                     return Ok(true);
                 }
 
-                let output = handle_command(rt, client, &cmd, shutdown);
-                for line in output.lines() {
-                    app.push_log(line.to_string());
-                }
-                app.push_log(String::new());
-
-                if cmd == "stop" {
-                    return Ok(true);
-                }
+                // Fire-and-forget: the RPC call runs as a tokio task,
+                // the TUI keeps running, and the result lines arrive
+                // via `log_tx` and show up in the next render pass.
+                // /stop flips the shutdown flag synchronously so the
+                // main loop exits on the next iteration.
+                handle_command(rt, client, log_tx, &cmd, shutdown);
             }
         }
 
@@ -1330,55 +1335,88 @@ fn handle_key(
 
 // --- Command handler ----------------------------------------------------- //
 
+/// Dispatch a parsed command.
+///
+/// This function is **fire-and-forget**: it validates the command
+/// synchronously, then spawns a Tokio task that runs the RPC call and
+/// streams its output lines back through `log_tx`.  The TUI event loop
+/// keeps running while the task works, so long-operations like
+/// `sendtoaddress` (which mines ~2 s of anti-spam PoW) no longer
+/// freeze the display.
 fn handle_command(
     rt: &tokio::runtime::Handle,
     client: &jsonrpsee::http_client::HttpClient,
+    log_tx: &std::sync::mpsc::Sender<String>,
     cmd: &str,
-    shutdown: &AtomicBool,
-) -> String {
+    shutdown: &Arc<AtomicBool>,
+) {
     use jsonrpsee::core::client::ClientT;
     use jsonrpsee::rpc_params;
 
+    // /help is synchronous — no RPC, just print the command table.
     if cmd == "help" {
-        let mut lines = vec![format!("  {BOLD}Commands:{RESET}"), String::new()];
+        let _ = log_tx.send(format!("  {BOLD}Commands:{RESET}"));
+        let _ = log_tx.send(String::new());
         for (name, desc) in COMMANDS {
-            lines.push(format!("    {BLUE}/{name:<22}{RESET} {DIM}{desc}{RESET}"));
+            let _ = log_tx.send(format!("    {BLUE}/{name:<22}{RESET} {DIM}{desc}{RESET}"));
         }
-        return lines.join("\n");
+        let _ = log_tx.send(String::new());
+        return;
     }
 
     let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let name = parts[0];
+    if parts.is_empty() {
+        return;
+    }
+    let name = parts[0].to_string();
 
-    // Input validation.
-    match name {
-        "getblock" if parts.len() < 2 => return format!("  {DIM}Usage: /getblock <height>{RESET}"),
-        "getblock" if parts[1].parse::<u64>().is_err() => {
-            return format!("  {RED}Error: '{}' is not a valid height.{RESET}", parts[1]);
-        }
+    // Cheap client-side validation — errors are reported synchronously
+    // without hitting the RPC server.
+    let validation_error: Option<String> = match name.as_str() {
+        "getblock" if parts.len() < 2 => Some(format!("  {DIM}Usage: /getblock <height>{RESET}")),
+        "getblock" if parts[1].parse::<u64>().is_err() => Some(format!(
+            "  {RED}Error: '{}' is not a valid height.{RESET}",
+            parts[1]
+        )),
         "getbalance" if parts.len() < 2 => {
-            return format!("  {DIM}Usage: /getbalance <address>{RESET}");
+            Some(format!("  {DIM}Usage: /getbalance <address>{RESET}"))
         }
         "getbalance" if !parts[1].starts_with("aiir") => {
-            return format!("  {RED}Error: not a BitAiir address.{RESET}");
+            Some(format!("  {RED}Error: not a BitAiir address.{RESET}"))
         }
-        "sendtoaddress" if parts.len() < 3 => {
-            return format!("  {DIM}Usage: /sendtoaddress <addr> <amount>{RESET}");
-        }
+        "sendtoaddress" if parts.len() < 3 => Some(format!(
+            "  {DIM}Usage: /sendtoaddress <addr> <amount>{RESET}"
+        )),
         "sendtoaddress" if !parts[1].starts_with("aiir") => {
-            return format!("  {RED}Error: not a BitAiir address.{RESET}");
+            Some(format!("  {RED}Error: not a BitAiir address.{RESET}"))
         }
         "sendtoaddress" if parts[2].parse::<f64>().unwrap_or(0.0) <= 0.0 => {
-            return format!("  {RED}Error: amount must be > 0.{RESET}");
+            Some(format!("  {RED}Error: amount must be > 0.{RESET}"))
         }
         "addpeer" if parts.len() < 2 || !parts[1].contains(':') => {
-            return format!("  {DIM}Usage: /addpeer <ip:port>{RESET}");
+            Some(format!("  {DIM}Usage: /addpeer <ip:port>{RESET}"))
         }
-        _ => {}
+        _ => None,
+    };
+    if let Some(err) = validation_error {
+        let _ = log_tx.send(err);
+        let _ = log_tx.send(String::new());
+        return;
     }
 
-    let result: Result<serde_json::Value, _> = rt.block_on(async {
-        match name {
+    // /stop: flip the shutdown flag *before* spawning so the main loop
+    // can exit even if the RPC response never arrives.
+    if name == "stop" {
+        shutdown.store(true, Ordering::Relaxed);
+    }
+
+    // Snapshot everything the async task needs.
+    let client = client.clone();
+    let log_tx = log_tx.clone();
+    let parts: Vec<String> = parts.into_iter().map(String::from).collect();
+
+    rt.spawn(async move {
+        let result: Result<serde_json::Value, _> = match name.as_str() {
             "getblockchaininfo" => client.request("getblockchaininfo", rpc_params![]).await,
             "getblock" => {
                 let h: u64 = parts[1].parse().unwrap();
@@ -1387,14 +1425,14 @@ fn handle_command(
             "getnewaddress" => client.request("getnewaddress", rpc_params![]).await,
             "getbalance" => {
                 client
-                    .request("getbalance", rpc_params![parts[1].to_string()])
+                    .request("getbalance", rpc_params![parts[1].clone()])
                     .await
             }
             "listaddresses" => client.request("listaddresses", rpc_params![]).await,
             "sendtoaddress" => {
                 let amt: f64 = parts[2].parse().unwrap();
                 client
-                    .request("sendtoaddress", rpc_params![parts[1].to_string(), amt])
+                    .request("sendtoaddress", rpc_params![parts[1].clone(), amt])
                     .await
             }
             "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,
@@ -1402,37 +1440,38 @@ fn handle_command(
             "mine-stop" => client.request("setmining", rpc_params![false]).await,
             "addpeer" => {
                 client
-                    .request("addpeer", rpc_params![parts[1].to_string()])
+                    .request("addpeer", rpc_params![parts[1].clone()])
                     .await
             }
             "listpeers" => client.request("listpeers", rpc_params![]).await,
-            "stop" => {
-                shutdown.store(true, Ordering::Relaxed);
-                client.request("stop", rpc_params![]).await
-            }
-            _ => Ok(serde_json::json!(format!(
-                "Unknown: '/{name}'. Type /help."
+            "stop" => client.request("stop", rpc_params![]).await,
+            other => Ok(serde_json::json!(format!(
+                "Unknown: '/{other}'. Type /help."
             ))),
-        }
-    });
+        };
 
-    match result {
-        Ok(val) => {
-            let json = serde_json::to_string_pretty(&val).unwrap_or_default();
-            json.lines()
-                .map(|l| format!("  {l}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if let Some(start) = msg.find("message: \"") {
-                let rest = &msg[start + 10..];
-                if let Some(end) = rest.find('"') {
-                    return format!("  {RED}Error: {}{RESET}", &rest[..end]);
+        match result {
+            Ok(val) => {
+                let json = serde_json::to_string_pretty(&val).unwrap_or_default();
+                for line in json.lines() {
+                    let _ = log_tx.send(format!("  {line}"));
                 }
             }
-            format!("  {RED}Error: {msg}{RESET}")
+            Err(e) => {
+                let msg = e.to_string();
+                let text = if let Some(start) = msg.find("message: \"") {
+                    let rest = &msg[start + 10..];
+                    if let Some(end) = rest.find('"') {
+                        format!("  {RED}Error: {}{RESET}", &rest[..end])
+                    } else {
+                        format!("  {RED}Error: {msg}{RESET}")
+                    }
+                } else {
+                    format!("  {RED}Error: {msg}{RESET}")
+                };
+                let _ = log_tx.send(text);
+            }
         }
-    }
+        let _ = log_tx.send(String::new());
+    });
 }
