@@ -16,20 +16,19 @@
 //! the minimum needed for a mining log view with a prompt at the bottom.
 
 use std::io::{self, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-    EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::style::Print;
 use crossterm::terminal::{
-    self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, queue};
 
@@ -119,7 +118,7 @@ impl LogBuffer {
 
 /// Buffer-space coordinate (row is an index into `LogBuffer::lines`,
 /// col is a visible character offset into that line).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct Point {
     row: usize,
     col: usize,
@@ -227,9 +226,8 @@ fn open_terminal_writer() -> Option<std::fs::File> {
         if winapi::GetConsoleMode(h, &mut mode) == 0 {
             return None;
         }
-        let new_mode = mode
-            | winapi::ENABLE_PROCESSED_OUTPUT
-            | winapi::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        let new_mode =
+            mode | winapi::ENABLE_PROCESSED_OUTPUT | winapi::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         if winapi::SetConsoleMode(h, new_mode) == 0 {
             return None;
         }
@@ -246,7 +244,7 @@ fn open_terminal_writer() -> Option<std::fs::File> {
 }
 
 #[cfg(windows)]
-#[allow(non_camel_case_types, non_snake_case)]
+#[allow(non_camel_case_types, non_snake_case, clippy::upper_case_acronyms)]
 mod winapi {
     use std::ffi::c_void;
 
@@ -628,8 +626,7 @@ fn render_frame(app: &mut App) -> io::Result<()> {
     };
 
     // Scrollbar: compute thumb row range over the viewport.
-    let (thumb_start, thumb_end) =
-        thumb_range(buf.scroll_offset, buf.lines.len(), height);
+    let (thumb_start, thumb_end) = thumb_range(buf.scroll_offset, buf.lines.len(), height);
     let normal_right = format!("{DIM}│{RESET}");
     let thumb_right = format!("{BLUE}┃{RESET}");
 
@@ -729,11 +726,7 @@ fn append_input_line<W: io::Write>(out: &mut W, app: &App) -> io::Result<()> {
     } else {
         let rest = &app.input[app.cursor..];
         let ch_len = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        (
-            &app.input[..app.cursor],
-            &rest[..ch_len],
-            &rest[ch_len..],
-        )
+        (&app.input[..app.cursor], &rest[..ch_len], &rest[ch_len..])
     };
     let input_vlen = if cursor_at_end {
         app.input.len() + 1
@@ -775,11 +768,7 @@ fn render_input_only(app: &mut App) -> io::Result<()> {
 }
 
 /// Draw the autocomplete popup over the bottom of the log viewport.
-fn render_autocomplete<W: io::Write>(
-    out: &mut W,
-    app: &App,
-    log_bot: u16,
-) -> io::Result<()> {
+fn render_autocomplete<W: io::Write>(out: &mut W, app: &App, log_bot: u16) -> io::Result<()> {
     let prefix = if app.input.starts_with('/') {
         &app.input[1..]
     } else {
@@ -799,11 +788,13 @@ fn render_autocomplete<W: io::Write>(
         if row > log_bot {
             break;
         }
-        let marker = if i == app.autocomplete_idx { "▸" } else { " " };
+        let marker = if i == app.autocomplete_idx {
+            "▸"
+        } else {
+            " "
+        };
         let bold = if i == app.autocomplete_idx { BOLD } else { "" };
-        let content = format!(
-            " {marker} {bold}{BLUE}/{name:<22}{RESET}  {DIM}{desc}{RESET}",
-        );
+        let content = format!(" {marker} {bold}{BLUE}/{name:<22}{RESET}  {DIM}{desc}{RESET}",);
         queue!(out, MoveTo(0, row))?;
         queue!(out, Print(bordered(&content, app.cols)))?;
     }
@@ -835,11 +826,7 @@ fn selection_text(app: &App) -> Option<String> {
             out.push('\n');
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn copy_to_clipboard(app: &mut App, text: &str) {
@@ -848,8 +835,8 @@ fn copy_to_clipboard(app: &mut App, text: &str) {
     }
     // OSC 52 fallback: set both primary and clipboard selections.
     // Useful for SSH sessions where arboard can't reach the host.
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
     let encoded = STANDARD.encode(text.as_bytes());
     let _ = io::stdout().write_all(format!("\x1b]52;c;{}\x07", encoded).as_bytes());
     let _ = io::stdout().flush();
@@ -987,12 +974,6 @@ fn handle_mouse_drag(col: u16, row: u16, app: &mut App) {
     app.mark_full();
 }
 
-impl Default for Point {
-    fn default() -> Self {
-        Point { row: 0, col: 0 }
-    }
-}
-
 fn handle_mouse_up(app: &mut App) {
     if !app.selection.dragging {
         return;
@@ -1020,8 +1001,7 @@ pub fn run_repl(
 
     let (cols, rows) = terminal::size()?;
     if rows < CHROME_ROWS + 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             "Terminal too small (need at least 6 rows)",
         ));
     }
@@ -1361,9 +1341,7 @@ fn handle_command(
     if cmd == "help" {
         let mut lines = vec![format!("  {BOLD}Commands:{RESET}"), String::new()];
         for (name, desc) in COMMANDS {
-            lines.push(format!(
-                "    {BLUE}/{name:<22}{RESET} {DIM}{desc}{RESET}"
-            ));
+            lines.push(format!("    {BLUE}/{name:<22}{RESET} {DIM}{desc}{RESET}"));
         }
         return lines.join("\n");
     }
@@ -1373,76 +1351,54 @@ fn handle_command(
 
     // Input validation.
     match name {
-        "getblock" if parts.len() < 2 => {
-            return format!("  {DIM}Usage: /getblock <height>{RESET}")
-        }
+        "getblock" if parts.len() < 2 => return format!("  {DIM}Usage: /getblock <height>{RESET}"),
         "getblock" if parts[1].parse::<u64>().is_err() => {
-            return format!(
-                "  {RED}Error: '{}' is not a valid height.{RESET}",
-                parts[1]
-            )
+            return format!("  {RED}Error: '{}' is not a valid height.{RESET}", parts[1]);
         }
         "getbalance" if parts.len() < 2 => {
-            return format!("  {DIM}Usage: /getbalance <address>{RESET}")
+            return format!("  {DIM}Usage: /getbalance <address>{RESET}");
         }
         "getbalance" if !parts[1].starts_with("aiir") => {
-            return format!("  {RED}Error: not a BitAiir address.{RESET}")
+            return format!("  {RED}Error: not a BitAiir address.{RESET}");
         }
         "sendtoaddress" if parts.len() < 3 => {
-            return format!(
-                "  {DIM}Usage: /sendtoaddress <addr> <amount>{RESET}"
-            )
+            return format!("  {DIM}Usage: /sendtoaddress <addr> <amount>{RESET}");
         }
         "sendtoaddress" if !parts[1].starts_with("aiir") => {
-            return format!("  {RED}Error: not a BitAiir address.{RESET}")
+            return format!("  {RED}Error: not a BitAiir address.{RESET}");
         }
         "sendtoaddress" if parts[2].parse::<f64>().unwrap_or(0.0) <= 0.0 => {
-            return format!("  {RED}Error: amount must be > 0.{RESET}")
+            return format!("  {RED}Error: amount must be > 0.{RESET}");
         }
         "addpeer" if parts.len() < 2 || !parts[1].contains(':') => {
-            return format!("  {DIM}Usage: /addpeer <ip:port>{RESET}")
+            return format!("  {DIM}Usage: /addpeer <ip:port>{RESET}");
         }
         _ => {}
     }
 
     let result: Result<serde_json::Value, _> = rt.block_on(async {
         match name {
-            "getblockchaininfo" => {
-                client.request("getblockchaininfo", rpc_params![]).await
-            }
+            "getblockchaininfo" => client.request("getblockchaininfo", rpc_params![]).await,
             "getblock" => {
                 let h: u64 = parts[1].parse().unwrap();
                 client.request("getblock", rpc_params![h]).await
             }
-            "getnewaddress" => {
-                client.request("getnewaddress", rpc_params![]).await
-            }
+            "getnewaddress" => client.request("getnewaddress", rpc_params![]).await,
             "getbalance" => {
                 client
                     .request("getbalance", rpc_params![parts[1].to_string()])
                     .await
             }
-            "listaddresses" => {
-                client.request("listaddresses", rpc_params![]).await
-            }
+            "listaddresses" => client.request("listaddresses", rpc_params![]).await,
             "sendtoaddress" => {
                 let amt: f64 = parts[2].parse().unwrap();
                 client
-                    .request(
-                        "sendtoaddress",
-                        rpc_params![parts[1].to_string(), amt],
-                    )
+                    .request("sendtoaddress", rpc_params![parts[1].to_string(), amt])
                     .await
             }
-            "getmempoolinfo" => {
-                client.request("getmempoolinfo", rpc_params![]).await
-            }
-            "mine-start" => {
-                client.request("setmining", rpc_params![true]).await
-            }
-            "mine-stop" => {
-                client.request("setmining", rpc_params![false]).await
-            }
+            "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,
+            "mine-start" => client.request("setmining", rpc_params![true]).await,
+            "mine-stop" => client.request("setmining", rpc_params![false]).await,
             "addpeer" => {
                 client
                     .request("addpeer", rpc_params![parts[1].to_string()])
