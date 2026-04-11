@@ -106,6 +106,12 @@ clap = { version = "4", features = ["derive"] }
 ratatui = "0.29"
 crossterm = "0.28"
 
+# Cross-platform system clipboard (copy-on-select for the TUI).
+arboard = "3"
+
+# Line editor for the interactive REPL (history, arrow keys, tab completion).
+rustyline = "15"
+
 # Structured logging.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

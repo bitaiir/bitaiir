@@ -503,14 +503,13 @@ async fn main() {
     // --- Wait for shutdown / interactive REPL ----------------------------- //
 
     if args.interactive {
-        // Don't block the async runtime — run TUI in a blocking thread.
-        let tui_rpc_addr = args.rpc_addr.clone();
-        let tui_shutdown = shutdown.clone();
+        let repl_rpc_addr = args.rpc_addr.clone();
+        let repl_shutdown = shutdown.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            // Small delay to let RPC server start.
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            if let Err(e) = tui::run_tui(&tui_rpc_addr, log_rx, tui_shutdown) {
-                eprintln!("TUI error: {e}");
+            // Wait for RPC server to be ready.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if let Err(e) = tui::run_repl(&repl_rpc_addr, log_rx, repl_shutdown) {
+                eprintln!("REPL error: {e}");
             }
         })
         .await;

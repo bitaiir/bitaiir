@@ -1,34 +1,62 @@
-//! Terminal UI for interactive mode.
+//! Interactive REPL with software scroll and custom text selection.
 //!
-//! Split screen: scrollable log area on top, command input at the
-//! bottom. Mining events, system logs, and command results all flow
-//! into the log area. The input bar shows a `bitaiir>` prompt.
+//! Architecture (inspired by Claude Code's `Ink` renderer):
+//!
+//!   - Alternate screen + full mouse capture (SGR modes).  The whole
+//!     terminal is ours; nothing leaks into scrollback.
+//!   - Line-based log buffer (`Vec<String>`) with a scroll offset.
+//!     Viewport culling renders `lines[off .. off + height]`.
+//!   - Anchor/focus selection model: click starts, drag extends, release
+//!     finishes and copies to the system clipboard via `arboard`.
+//!     Double-click = word, triple-click = line.
+//!   - Full-frame render on every dirty tick, wrapped in DEC 2026
+//!     synchronized-output markers so supported terminals never tear.
+//!
+//! Nothing here is trying to be a general-purpose TUI framework — it's
+//! the minimum needed for a mining log view with a prompt at the bottom.
 
-use std::sync::Arc;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+    EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEventKind,
 };
-use crossterm::execute;
+use crossterm::style::Print;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use jsonrpsee::core::client::ClientT;
-use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
-use jsonrpsee::rpc_params;
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
-};
+use crossterm::{execute, queue};
 
-/// Available slash commands with descriptions.
+// --- ANSI colors --------------------------------------------------------- //
+
+const BLUE: &str = "\x1b[38;2;18;148;215m";
+const RED: &str = "\x1b[38;2;240;80;80m";
+const DIM: &str = "\x1b[90m";
+const BOLD: &str = "\x1b[1m";
+const RESET: &str = "\x1b[0m";
+
+/// Inverse video ON / OFF — used to highlight selected cells.
+const INV_ON: &str = "\x1b[7m";
+const INV_OFF: &str = "\x1b[27m";
+
+/// Rows of fixed "chrome" around the log viewport: 1 top border,
+/// 1 separator, 1 input, 1 bottom border.
+const CHROME_ROWS: u16 = 4;
+
+/// Rows the mouse wheel scrolls per event.
+const WHEEL_STEP: usize = 3;
+
+/// Max milliseconds between clicks to count as a multi-click.
+const MULTI_CLICK_MS: u128 = 500;
+
+// --- Commands ------------------------------------------------------------ //
+
 const COMMANDS: &[(&str, &str)] = &[
     ("getblockchaininfo", "Show chain status"),
     ("getblock", "Show block at height"),
@@ -45,58 +73,261 @@ const COMMANDS: &[(&str, &str)] = &[
     ("exit", "Exit BitAiir"),
 ];
 
-/// Application state for the TUI.
+// --- Data model ---------------------------------------------------------- //
+
+/// All log lines + current scroll position.
+struct LogBuffer {
+    lines: Vec<String>,
+    /// Index into `lines` of the first visible row.
+    scroll_offset: usize,
+    /// True when the viewport is pinned to the bottom (auto-follow).
+    sticky: bool,
+}
+
+impl LogBuffer {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            scroll_offset: 0,
+            sticky: true,
+        }
+    }
+
+    fn push(&mut self, line: String, viewport_height: usize) {
+        self.lines.push(line);
+        if self.sticky {
+            self.scroll_to_bottom(viewport_height);
+        }
+    }
+
+    fn scroll_to_bottom(&mut self, viewport_height: usize) {
+        self.scroll_offset = self.lines.len().saturating_sub(viewport_height);
+        self.sticky = true;
+    }
+
+    fn scroll_up(&mut self, by: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(by);
+        self.sticky = false;
+    }
+
+    fn scroll_down(&mut self, by: usize, viewport_height: usize) {
+        let max = self.lines.len().saturating_sub(viewport_height);
+        self.scroll_offset = (self.scroll_offset + by).min(max);
+        self.sticky = self.scroll_offset >= max;
+    }
+}
+
+/// Buffer-space coordinate (row is an index into `LogBuffer::lines`,
+/// col is a visible character offset into that line).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Point {
+    row: usize,
+    col: usize,
+}
+
+impl Point {
+    fn before(&self, other: &Self) -> bool {
+        (self.row, self.col) <= (other.row, other.col)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionMode {
+    Char,
+    Word,
+    Line,
+}
+
+/// Anchor + focus selection. `None` for both means no selection.
+struct Selection {
+    anchor: Option<Point>,
+    focus: Option<Point>,
+    dragging: bool,
+    mode: SelectionMode,
+    /// For word / line mode: the span selected by the multi-click.
+    /// Drag extensions grow away from this span, never shrink it.
+    anchor_span: Option<(Point, Point)>,
+}
+
+impl Selection {
+    fn new() -> Self {
+        Self {
+            anchor: None,
+            focus: None,
+            dragging: false,
+            mode: SelectionMode::Char,
+            anchor_span: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.anchor = None;
+        self.focus = None;
+        self.dragging = false;
+        self.mode = SelectionMode::Char;
+        self.anchor_span = None;
+    }
+
+    fn active(&self) -> bool {
+        self.anchor.is_some() && self.focus.is_some()
+    }
+
+    /// Return the selection as (start, end) with `start.before(end)`.
+    fn normalized(&self) -> Option<(Point, Point)> {
+        let a = self.anchor?;
+        let f = self.focus?;
+        if a.before(&f) {
+            Some((a, f))
+        } else {
+            Some((f, a))
+        }
+    }
+
+    /// Selection range on a given buffer row, as a half-open `[start, end)`
+    /// in visible columns, or `None` if the row has no selection.
+    fn range_on_row(&self, row: usize) -> Option<(usize, usize)> {
+        let (s, e) = self.normalized()?;
+        if row < s.row || row > e.row {
+            return None;
+        }
+        let col_start = if row == s.row { s.col } else { 0 };
+        let col_end = if row == e.row { e.col } else { usize::MAX };
+        if col_start >= col_end {
+            None
+        } else {
+            Some((col_start, col_end))
+        }
+    }
+}
+
+/// Open a direct, unbuffered handle to the controlling terminal.
+///
+/// Rust's `io::stdout()` pipes through a `LineWriter` whose internal
+/// buffer is 1 KiB, and on Windows the UTF-8 → UTF-16 conversion caps
+/// each `WriteConsoleW` call at 4096 wchars.  A 9 KiB frame therefore
+/// reaches Windows Terminal as 2-3 separate syscalls, and WT renders
+/// each chunk as it arrives — that's where the mid-frame cursor
+/// flashes came from.  Opening `CONOUT$` directly gives us a `File`
+/// that uses `WriteFile`, which takes the whole buffer in one call.
+#[cfg(windows)]
+fn open_terminal_writer() -> Option<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open("CONOUT$")
+        .ok()?;
+
+    // The fresh handle does *not* inherit stdout's console mode, so we
+    // need to turn on virtual-terminal processing ourselves — otherwise
+    // our ANSI escape sequences are written as literal text.
+    unsafe {
+        let h = f.as_raw_handle() as winapi::HANDLE;
+        let mut mode: u32 = 0;
+        if winapi::GetConsoleMode(h, &mut mode) == 0 {
+            return None;
+        }
+        let new_mode = mode
+            | winapi::ENABLE_PROCESSED_OUTPUT
+            | winapi::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        if winapi::SetConsoleMode(h, new_mode) == 0 {
+            return None;
+        }
+    }
+    Some(f)
+}
+
+#[cfg(not(windows))]
+fn open_terminal_writer() -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .ok()
+}
+
+#[cfg(windows)]
+#[allow(non_camel_case_types, non_snake_case)]
+mod winapi {
+    use std::ffi::c_void;
+
+    pub type HANDLE = *mut c_void;
+    pub const ENABLE_PROCESSED_OUTPUT: u32 = 0x0001;
+    pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+    unsafe extern "system" {
+        pub fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *mut u32) -> i32;
+        pub fn SetConsoleMode(hConsoleHandle: HANDLE, dwMode: u32) -> i32;
+    }
+}
+
+/// Top-level app state.
 struct App {
-    logs: Vec<String>,
     input: String,
-    /// Cursor position within `input` (byte offset).
     cursor: usize,
     history: Vec<String>,
     history_idx: Option<usize>,
-    should_quit: bool,
     autocomplete: bool,
     autocomplete_idx: usize,
-    /// Manual scroll offset for the log panel. `None` = auto-scroll
-    /// to bottom. `Some(n)` = user scrolled to line `n`.
-    log_scroll: Option<usize>,
-    /// Visible lines in the log panel (updated each frame).
-    visible_lines: usize,
+    cols: u16,
+    rows: u16,
+    dirty: bool,
+    /// When true, the next render repaints every row; when false, it
+    /// only rewrites the input line.  Typing only needs the small
+    /// partial redraw — repainting the whole 5 KiB frame for every
+    /// keystroke is what the user was seeing as a mid-box flash.
+    full_redraw: bool,
+    buffer: LogBuffer,
+    selection: Selection,
+    /// For multi-click detection: last click's (col, row, time).
+    last_click: Option<(u16, u16, Instant)>,
+    click_count: u32,
+    clipboard: Option<arboard::Clipboard>,
+    /// Unbuffered direct-to-terminal writer (see `open_terminal_writer`).
+    term: Option<std::fs::File>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(cols: u16, rows: u16) -> Self {
         Self {
-            logs: vec![
-                String::new(),
-                "  Type / to see commands. Example: /mine-start".into(),
-                String::new(),
-            ],
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
             history_idx: None,
-            should_quit: false,
             autocomplete: false,
             autocomplete_idx: 0,
-            log_scroll: None,
-            visible_lines: 20,
+            cols,
+            rows,
+            dirty: true,
+            full_redraw: true,
+            buffer: LogBuffer::new(),
+            selection: Selection::new(),
+            last_click: None,
+            click_count: 0,
+            clipboard: arboard::Clipboard::new().ok(),
+            term: open_terminal_writer(),
         }
     }
 
-    fn push_log(&mut self, line: String) {
-        self.logs.push(line);
-        // Do NOT reset log_scroll here. If the user scrolled up
-        // manually, let them stay there. Auto-scroll only happens
-        // when log_scroll is None (the initial/default state).
+    fn viewport_height(&self) -> usize {
+        self.rows.saturating_sub(CHROME_ROWS) as usize
     }
 
-    /// Insert a character at the cursor position.
+    /// First screen row (0-based) of the log viewport.
+    fn log_top(&self) -> u16 {
+        1
+    }
+
+    /// Last screen row (0-based) of the log viewport.
+    fn log_bottom(&self) -> u16 {
+        self.rows.saturating_sub(CHROME_ROWS + 1) + 1
+    }
+
     fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+        self.dirty = true;
     }
 
-    /// Delete the character before the cursor.
     fn delete_char(&mut self) {
         if self.cursor > 0 {
             let prev = self.input[..self.cursor]
@@ -106,23 +337,150 @@ impl App {
                 .unwrap_or(0);
             self.cursor -= prev;
             self.input.remove(self.cursor);
+            self.dirty = true;
         }
     }
 
-    /// Set the input and move cursor to the end.
     fn set_input(&mut self, s: String) {
         self.cursor = s.len();
         self.input = s;
+        self.dirty = true;
     }
 
-    /// Clear the input and reset cursor.
     fn clear_input(&mut self) {
         self.input.clear();
         self.cursor = 0;
+        self.dirty = true;
+    }
+
+    fn push_log(&mut self, line: String) {
+        let h = self.viewport_height();
+        self.buffer.push(line, h);
+        self.dirty = true;
+        self.full_redraw = true;
+    }
+
+    /// Mark everything as needing a redraw (scroll, autocomplete,
+    /// selection, resize, new log line — anything besides pure input
+    /// editing).
+    fn mark_full(&mut self) {
+        self.dirty = true;
+        self.full_redraw = true;
     }
 }
 
-/// Filter commands matching the typed prefix.
+// --- Helpers ------------------------------------------------------------- //
+
+/// Number of visible characters in a string (ignores ANSI escape sequences).
+fn visible_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut in_esc = false;
+    for c in s.chars() {
+        if in_esc {
+            if c.is_ascii_alphabetic() {
+                in_esc = false;
+            }
+        } else if c == '\x1b' {
+            in_esc = true;
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+/// Return the string with ANSI escape sequences removed.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_esc = false;
+    for c in s.chars() {
+        if in_esc {
+            if c.is_ascii_alphabetic() {
+                in_esc = false;
+            }
+        } else if c == '\x1b' {
+            in_esc = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Apply inverse-video SGR to the visible columns in `[col_start, col_end)`
+/// of `content`, passing through any ANSI escape sequences unchanged.
+fn apply_selection(content: &str, col_start: usize, col_end: usize) -> String {
+    let mut out = String::with_capacity(content.len() + 16);
+    let mut col = 0usize;
+    let mut in_esc = false;
+    let mut selected = false;
+    for c in content.chars() {
+        if in_esc {
+            out.push(c);
+            if c.is_ascii_alphabetic() {
+                in_esc = false;
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            out.push(c);
+            in_esc = true;
+            continue;
+        }
+        let should = col >= col_start && col < col_end;
+        if should && !selected {
+            out.push_str(INV_ON);
+            selected = true;
+        } else if !should && selected {
+            out.push_str(INV_OFF);
+            selected = false;
+        }
+        out.push(c);
+        col += 1;
+    }
+    if selected {
+        out.push_str(INV_OFF);
+    }
+    out
+}
+
+/// Wrap `content` in side borders `│ … │` padded to `cols` visible columns.
+/// `right` is the pre-formatted (ANSI-styled) right-edge character, so the
+/// caller can substitute a scrollbar thumb for the normal `│`.
+fn bordered_with(content: &str, cols: u16, right: &str) -> String {
+    let w = cols as usize;
+    if w < 6 {
+        return String::new();
+    }
+    let inner = w - 4;
+    let vlen = visible_len(content);
+    let pad = inner.saturating_sub(vlen);
+    format!("{DIM}│{RESET} {content}{} {right}", " ".repeat(pad))
+}
+
+/// Shortcut for a line with the default right border.
+fn bordered(content: &str, cols: u16) -> String {
+    bordered_with(content, cols, &format!("{DIM}│{RESET}"))
+}
+
+/// Compute the (start, end) row range — in viewport coordinates — that
+/// the scrollbar thumb covers.  Returns an empty range when no scrollbar
+/// is needed (all content fits on screen).
+fn thumb_range(scroll_offset: usize, total: usize, height: usize) -> (usize, usize) {
+    if total <= height || height == 0 {
+        return (0, 0);
+    }
+    let thumb_size = ((height * height) / total).max(1);
+    let max_scroll = total - height;
+    let thumb_start = if max_scroll > 0 {
+        (scroll_offset * (height.saturating_sub(thumb_size))) / max_scroll
+    } else {
+        0
+    };
+    let thumb_end = (thumb_start + thumb_size).min(height);
+    (thumb_start, thumb_end)
+}
+
 fn filter_commands(prefix: &str) -> Vec<(&'static str, &'static str)> {
     COMMANDS
         .iter()
@@ -131,569 +489,960 @@ fn filter_commands(prefix: &str) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// Run the TUI. Blocks until the user exits.
-pub fn run_tui(
-    rpc_addr: &str,
-    log_rx: Receiver<String>,
-    shutdown: Arc<AtomicBool>,
-) -> std::io::Result<()> {
-    let rt = tokio::runtime::Handle::current();
-    let url = format!("http://{rpc_addr}");
-    let client = HttpClientBuilder::default()
-        .build(&url)
-        .expect("build RPC client");
+/// iTerm2-style word-class: spaces / identifiers / punctuation.
+fn char_class(c: char) -> u8 {
+    if c == ' ' {
+        0
+    } else if c.is_alphanumeric() || "/-+~_.\\".contains(c) {
+        1
+    } else {
+        2
+    }
+}
 
-    // Setup terminal.
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+/// Given a buffer line and a column, return the `(start, end)` range
+/// of the word under `col` (in visible-column units, half-open).
+fn word_range(line: &str, col: usize) -> (usize, usize) {
+    let stripped = strip_ansi(line);
+    let chars: Vec<char> = stripped.chars().collect();
+    if chars.is_empty() || col >= chars.len() {
+        return (col, col);
+    }
+    let target = char_class(chars[col]);
+    let mut start = col;
+    while start > 0 && char_class(chars[start - 1]) == target {
+        start -= 1;
+    }
+    let mut end = col + 1;
+    while end < chars.len() && char_class(chars[end]) == target {
+        end += 1;
+    }
+    (start, end)
+}
 
-    let mut app = App::new();
-
-    // Main loop.
-    loop {
-        // Drain mining/system log messages.
-        while let Ok(msg) = log_rx.try_recv() {
-            app.push_log(msg);
+/// Extract visible columns `[start, end)` from an ANSI-styled line.
+fn slice_visible(content: &str, start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    let mut in_esc = false;
+    for c in content.chars() {
+        if in_esc {
+            if c.is_ascii_alphabetic() {
+                in_esc = false;
+            }
+            continue;
         }
-
-        // Update visible area size from terminal dimensions.
-        if let Ok(size) = terminal.size() {
-            app.visible_lines = size.height.saturating_sub(5) as usize;
+        if c == '\x1b' {
+            in_esc = true;
+            continue;
         }
-
-        // Render.
-        terminal.draw(|f| draw_ui(f, &app))?;
-
-        if app.should_quit {
+        if col >= start && col < end {
+            out.push(c);
+        }
+        col += 1;
+        if col >= end {
             break;
         }
+    }
+    out
+}
 
-        // Poll for keyboard events (50ms timeout = ~20 FPS).
-        if event::poll(Duration::from_millis(50))? {
-            let ev = event::read()?;
+/// Visible length of a line in the buffer (without ANSI).
+fn line_visible_len(line: &str) -> usize {
+    visible_len(line)
+}
 
-            // Mouse scroll support.
-            if let Event::Mouse(mouse) = &ev {
-                let max_scroll = app.logs.len().saturating_sub(app.visible_lines);
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        let current = app.log_scroll.unwrap_or(max_scroll);
-                        app.log_scroll = Some(current.saturating_sub(3));
-                    }
-                    MouseEventKind::ScrollDown => {
-                        if let Some(s) = app.log_scroll {
-                            let new_pos = s + 3;
-                            if new_pos >= max_scroll {
-                                app.log_scroll = None;
-                            } else {
-                                app.log_scroll = Some(new_pos);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+// --- Coordinate mapping -------------------------------------------------- //
+
+/// Map a screen point to a buffer point, clamped to valid positions.
+/// Returns `None` if the screen point is outside the log viewport.
+fn screen_to_buffer(screen_col: u16, screen_row: u16, app: &App) -> Option<Point> {
+    let top = app.log_top();
+    let bot = app.log_bottom();
+    if screen_row < top || screen_row > bot {
+        return None;
+    }
+    // Inner content starts after "│ " (cols 0..=1).
+    if screen_col < 2 {
+        return None;
+    }
+    let col = (screen_col - 2) as usize;
+    let row_in_view = (screen_row - top) as usize;
+    let buf_row = app.buffer.scroll_offset + row_in_view;
+    Some(Point { row: buf_row, col })
+}
+
+// --- Rendering ----------------------------------------------------------- //
+
+/// Format the top border with the app title embedded.
+fn render_top_border(cols: u16) -> String {
+    let w = cols as usize;
+    if w < 30 {
+        return format!("{DIM}╭{}╮{RESET}", "─".repeat(w.saturating_sub(2)));
+    }
+    // Visible prefix: "╭─── BitAiir Core v0.1.0 " = 25 chars
+    let prefix_vis = 25;
+    let fill = w.saturating_sub(prefix_vis + 1);
+    format!(
+        "{DIM}╭─── {BLUE}{BOLD}BitAiir Core v0.1.0{RESET}{DIM} {}╮{RESET}",
+        "─".repeat(fill)
+    )
+}
+
+/// Render the full frame.
+///
+/// The whole frame is built into a local `Vec<u8>` and shipped to the
+/// terminal with a single `write_all` on the direct `CONOUT$` /
+/// `/dev/tty` handle.  Rust's `io::stdout()` buffers through a 1 KiB
+/// `LineWriter`, so a 9 KiB frame is split into several syscalls and
+/// Windows Terminal renders each chunk as it arrives — that's what the
+/// cursor flash was.  Going around stdout entirely makes every frame
+/// land atomically.
+fn render_frame(app: &mut App) -> io::Result<()> {
+    let w = app.cols;
+    let rows = app.rows;
+    let log_top = app.log_top();
+    let log_bot = app.log_bottom();
+    let height = app.viewport_height();
+
+    let mut out: Vec<u8> = Vec::with_capacity(16 * 1024);
+
+    // Begin synchronized output.  The cursor is already hidden via
+    // `execute!(..., Hide)` at startup and stays hidden for the whole
+    // TUI lifetime, so we don't re-send the hide sequence every frame.
+    out.extend_from_slice(b"\x1b[?2026h");
+
+    // Top border.  Every drawn row fills the full terminal width,
+    // so an explicit `Clear` before each `Print` is redundant and
+    // only adds a blank-line instant that Windows Terminal may flash.
+    queue!(out, MoveTo(0, 0))?;
+    queue!(out, Print(render_top_border(w)))?;
+
+    // Log viewport.
+    let buf = &app.buffer;
+    let end = (buf.scroll_offset + height).min(buf.lines.len());
+    let visible_slice: &[String] = if buf.scroll_offset < buf.lines.len() {
+        &buf.lines[buf.scroll_offset..end]
+    } else {
+        &[]
+    };
+
+    // Scrollbar: compute thumb row range over the viewport.
+    let (thumb_start, thumb_end) =
+        thumb_range(buf.scroll_offset, buf.lines.len(), height);
+    let normal_right = format!("{DIM}│{RESET}");
+    let thumb_right = format!("{BLUE}┃{RESET}");
+
+    for i in 0..height {
+        let row = log_top + i as u16;
+        queue!(out, MoveTo(0, row))?;
+
+        let line = if i < visible_slice.len() {
+            visible_slice[i].as_str()
+        } else {
+            ""
+        };
+        let buf_row = buf.scroll_offset + i;
+
+        let right = if i >= thumb_start && i < thumb_end {
+            &thumb_right
+        } else {
+            &normal_right
+        };
+
+        let rendered = if let Some((s, e)) = app.selection.range_on_row(buf_row) {
+            let vlen = line_visible_len(line);
+            let e_clamped = e.min(vlen);
+            if s >= e_clamped {
+                bordered_with(line, w, right)
+            } else {
+                let styled = apply_selection(line, s, e_clamped);
+                bordered_with(&styled, w, right)
             }
-
-            if let Event::Key(key) = ev {
-                // On Windows, crossterm fires both Press and Release
-                // events for each keystroke. Only process Press.
-                if key.kind != crossterm::event::KeyEventKind::Press {
-                    continue;
-                }
-                match key.code {
-                    // --- Autocomplete ------------------------------------ //
-                    KeyCode::Enter if app.autocomplete => {
-                        let prefix = if app.input.starts_with('/') {
-                            &app.input[1..]
-                        } else {
-                            &app.input
-                        };
-                        let filtered = filter_commands(prefix);
-                        if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
-                            app.set_input(format!("/{cmd}"));
-                        }
-                        app.autocomplete = false;
-                    }
-                    KeyCode::Tab if app.autocomplete => {
-                        let prefix = if app.input.starts_with('/') {
-                            &app.input[1..]
-                        } else {
-                            &app.input
-                        };
-                        let filtered = filter_commands(prefix);
-                        if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
-                            app.set_input(format!("/{cmd}"));
-                        }
-                        app.autocomplete = false;
-                    }
-                    KeyCode::Up if app.autocomplete => {
-                        app.autocomplete_idx = app.autocomplete_idx.saturating_sub(1);
-                    }
-                    KeyCode::Down if app.autocomplete => {
-                        let prefix = if app.input.starts_with('/') {
-                            &app.input[1..]
-                        } else {
-                            &app.input
-                        };
-                        let filtered = filter_commands(prefix);
-                        if app.autocomplete_idx + 1 < filtered.len() {
-                            app.autocomplete_idx += 1;
-                        }
-                    }
-
-                    // --- Execute command --------------------------------- //
-                    KeyCode::Enter => {
-                        let raw = app.input.trim().to_string();
-                        app.clear_input();
-                        app.history_idx = None;
-                        app.autocomplete = false;
-
-                        if raw.is_empty() {
-                            continue;
-                        }
-
-                        // Commands must start with "/".
-                        if !raw.starts_with('/') {
-                            app.push_log(format!("  > {raw}"));
-                            app.push_log(
-                                "  Commands must start with /. Type / to see available commands."
-                                    .into(),
-                            );
-                            app.push_log(String::new());
-                            continue;
-                        }
-
-                        let cmd = raw[1..].to_string(); // strip "/"
-                        app.history.push(raw.clone()); // save WITH "/"
-                        app.push_log(format!("  > /{cmd}"));
-
-                        if cmd == "exit" || cmd == "quit" {
-                            app.should_quit = true;
-                            continue;
-                        }
-
-                        let output = handle_command(&rt, &client, &cmd, &shutdown);
-                        for line in output.lines() {
-                            app.push_log(format!("  {line}"));
-                        }
-                        app.push_log(String::new());
-
-                        if cmd == "stop" {
-                            app.should_quit = true;
-                        }
-                    }
-
-                    // --- Text editing ------------------------------------ //
-                    KeyCode::Char(c) => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                            app.should_quit = true;
-                        } else {
-                            app.insert_char(c);
-                            if app.input == "/" {
-                                app.autocomplete = true;
-                                app.autocomplete_idx = 0;
-                            } else if app.autocomplete {
-                                app.autocomplete_idx = 0;
-                            }
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        app.delete_char();
-                        if app.input.is_empty() || !app.input.starts_with('/') {
-                            app.autocomplete = false;
-                        } else if app.autocomplete {
-                            app.autocomplete_idx = 0;
-                        }
-                    }
-                    KeyCode::Left => {
-                        // Move cursor left by one character.
-                        if app.cursor > 0 {
-                            let prev = app.input[..app.cursor]
-                                .chars()
-                                .last()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(0);
-                            app.cursor -= prev;
-                        }
-                    }
-                    KeyCode::Right => {
-                        if app.cursor < app.input.len() {
-                            let next = app.input[app.cursor..]
-                                .chars()
-                                .next()
-                                .map(|c| c.len_utf8())
-                                .unwrap_or(0);
-                            app.cursor += next;
-                        }
-                    }
-                    KeyCode::Home => {
-                        app.cursor = 0;
-                    }
-                    KeyCode::End => {
-                        app.cursor = app.input.len();
-                    }
-
-                    // --- Navigation -------------------------------------- //
-                    KeyCode::Esc => {
-                        if app.autocomplete {
-                            app.autocomplete = false;
-                            app.clear_input();
-                        } else {
-                            app.should_quit = true;
-                        }
-                        continue;
-                    }
-                    KeyCode::Up => {
-                        if !app.history.is_empty() {
-                            let idx = match app.history_idx {
-                                Some(i) if i > 0 => i - 1,
-                                Some(i) => i,
-                                None => app.history.len() - 1,
-                            };
-                            app.history_idx = Some(idx);
-                            app.set_input(app.history[idx].clone());
-                        }
-                    }
-                    KeyCode::Down => {
-                        if let Some(idx) = app.history_idx {
-                            if idx + 1 < app.history.len() {
-                                app.history_idx = Some(idx + 1);
-                                app.set_input(app.history[idx + 1].clone());
-                            } else {
-                                app.history_idx = None;
-                                app.clear_input();
-                            }
-                        }
-                    }
-                    KeyCode::PageUp => {
-                        let max_scroll = app.logs.len().saturating_sub(app.visible_lines);
-                        let current = app.log_scroll.unwrap_or(max_scroll);
-                        app.log_scroll = Some(current.saturating_sub(10));
-                    }
-                    KeyCode::PageDown => {
-                        if let Some(s) = app.log_scroll {
-                            let max_scroll = app.logs.len().saturating_sub(app.visible_lines);
-                            let new_pos = s + 10;
-                            if new_pos >= max_scroll {
-                                app.log_scroll = None;
-                            } else {
-                                app.log_scroll = Some(new_pos);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        } else {
+            bordered_with(line, w, right)
+        };
+        queue!(out, Print(rendered))?;
     }
 
-    // Restore terminal.
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    // Autocomplete overlay (drawn over the bottom of the log viewport).
+    if app.autocomplete {
+        render_autocomplete(&mut out, app, log_bot)?;
+    }
 
+    // Separator.
+    queue!(out, MoveTo(0, rows - 3))?;
+    queue!(
+        out,
+        Print(format!(
+            "{DIM}├{}┤{RESET}",
+            "─".repeat((w as usize).saturating_sub(2))
+        ))
+    )?;
+
+    // Input line (visual cursor drawn inline via inverse video).
+    append_input_line(&mut out, app)?;
+
+    // Bottom border.
+    queue!(out, MoveTo(0, rows - 1))?;
+    queue!(
+        out,
+        Print(format!(
+            "{DIM}╰{}╯{RESET}",
+            "─".repeat((w as usize).saturating_sub(2))
+        ))
+    )?;
+
+    // Park the (hidden) cursor somewhere stable.
+    queue!(out, MoveTo(0, rows - 2))?;
+
+    // End synchronized output.
+    out.extend_from_slice(b"\x1b[?2026l");
+
+    // Single atomic write: the whole frame reaches the terminal as one
+    // burst, so the real cursor never peeks through mid-render.
+    if let Some(term) = app.term.as_mut() {
+        term.write_all(&out)?;
+        term.flush()?;
+    } else {
+        // Fallback when we couldn't grab a direct terminal handle.
+        let stdout = io::stdout();
+        let mut lock = stdout.lock();
+        lock.write_all(&out)?;
+        lock.flush()?;
+    }
     Ok(())
 }
 
-/// Draw the UI: log area (top) + input bar (bottom).
-fn draw_ui(f: &mut ratatui::Frame, app: &App) {
-    use ratatui::widgets::BorderType;
+/// Queue the commands to (re)draw the bottom input line into `out`.
+/// The real terminal cursor stays hidden the whole TUI lifetime; the
+/// "visual cursor" is just an inverse-video character on the input row.
+fn append_input_line<W: io::Write>(out: &mut W, app: &App) -> io::Result<()> {
+    let w = app.cols;
+    let rows = app.rows;
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(5),    // log area
-            Constraint::Length(3), // input bar
-        ])
-        .split(f.area());
+    queue!(out, MoveTo(0, rows - 2))?;
 
-    // --- Log area -------------------------------------------------------- //
-
-    // Color palette built around the official BitAiir blue #1294D7.
-    let dim = Style::default().fg(Color::DarkGray);
-    let bitaiir_blue = Color::Rgb(18, 148, 215); // #1294D7 — brand color
-    let accent = bitaiir_blue;
-    let green = Color::Rgb(80, 200, 120);
-    let red = Color::Rgb(240, 80, 80);
-    let title_color = bitaiir_blue;
-
-    let log_lines: Vec<Line> = app
-        .logs
-        .iter()
-        .map(|s| {
-            if s.starts_with("  >") {
-                // User commands in accent blue.
-                Line::from(Span::styled(s.as_str(), Style::default().fg(accent)))
-            } else if s.contains("Height") && s.contains("Hash") {
-                // Table header in dim.
-                Line::from(Span::styled(s.as_str(), dim))
-            } else if s.contains("---") && !s.contains('"') {
-                // Separator lines in dim.
-                Line::from(Span::styled(s.as_str(), dim))
-            } else if s.contains("Block") || s.contains("mined") || s.contains("Mining") {
-                // Mining events in green.
-                Line::from(Span::styled(s.as_str(), Style::default().fg(green)))
-            } else if s.contains("ERROR") || s.contains("Error") || s.contains("failed") {
-                Line::from(Span::styled(s.as_str(), Style::default().fg(red)))
-            } else if s.contains('"') || s.contains('{') || s.contains('}') {
-                // JSON output in soft white.
-                Line::from(Span::styled(s.as_str(), Style::default().fg(Color::White)))
-            } else {
-                Line::from(Span::styled(s.as_str(), Style::default().fg(Color::Gray)))
-            }
-        })
-        .collect();
-
-    // Scroll position.
-    let visible_height = chunks[0].height.saturating_sub(2) as usize;
-    let max_scroll = log_lines.len().saturating_sub(visible_height);
-    let scroll: u16 = match app.log_scroll {
-        Some(s) => (s.min(max_scroll)) as u16,
-        None => max_scroll as u16, // auto-scroll to latest content
-    };
-
-    let num_lines = log_lines.len();
-    let log_panel = Paragraph::new(log_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(" BitAiir Core v0.1.0 ")
-                .title_style(
-                    Style::default()
-                        .fg(title_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
+    let cursor_at_end = app.cursor >= app.input.len();
+    let (before, at_char, after) = if cursor_at_end {
+        (app.input.as_str(), " ", "")
+    } else {
+        let rest = &app.input[app.cursor..];
+        let ch_len = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        (
+            &app.input[..app.cursor],
+            &rest[..ch_len],
+            &rest[ch_len..],
         )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-
-    f.render_widget(log_panel, chunks[0]);
-
-    // --- Scrollbar ------------------------------------------------------- //
-    if num_lines > visible_height {
-        // Use max_scroll as the total range so the thumb reaches the
-        // very bottom when scroll == max_scroll (auto-scroll position).
-        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll as usize);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
-        f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
-    }
-
-    // --- Input bar ------------------------------------------------------- //
-
-    // Styled prompt: "bitaiir" in accent, "> " dim, input in white.
-    let input_line = Line::from(vec![
-        Span::styled(
-            " bitaiir",
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("> ", Style::default().fg(Color::DarkGray)),
-        Span::styled(app.input.as_str(), Style::default().fg(Color::White)),
-    ]);
-
-    let input_bar = Paragraph::new(input_line).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::DarkGray)),
+    };
+    let input_vlen = if cursor_at_end {
+        app.input.len() + 1
+    } else {
+        app.input.len()
+    };
+    let prompt = format!(
+        "{DIM}│{RESET} {BLUE}{BOLD}bitaiir{RESET}{DIM}>{RESET} {before}{INV_ON}{at_char}{INV_OFF}{after}",
     );
+    let padding = (w as usize).saturating_sub(input_vlen + 12);
+    queue!(
+        out,
+        Print(&prompt),
+        Print(" ".repeat(padding)),
+        Print(format!("{DIM}│{RESET}")),
+    )?;
+    Ok(())
+}
 
-    f.render_widget(input_bar, chunks[1]);
+/// Redraw *only* the input line.  Used for pure input events (typing,
+/// cursor moves, history navigation) — the rest of the screen hasn't
+/// changed, so there's no reason to repaint the 5 KiB log frame.  A
+/// ~200-byte write reaches the terminal in a single syscall and
+/// renders atomically.
+fn render_input_only(app: &mut App) -> io::Result<()> {
+    let mut out: Vec<u8> = Vec::with_capacity(512);
+    append_input_line(&mut out, app)?;
 
-    // Position the cursor at the correct position within the input.
-    let prompt_len = " bitaiir> ".len() as u16;
-    let cursor_x = chunks[1].x + 1 + prompt_len + app.cursor as u16;
-    let cursor_y = chunks[1].y + 1;
-    f.set_cursor_position((cursor_x, cursor_y));
+    if let Some(term) = app.term.as_mut() {
+        term.write_all(&out)?;
+        term.flush()?;
+    } else {
+        let stdout = io::stdout();
+        let mut lock = stdout.lock();
+        lock.write_all(&out)?;
+        lock.flush()?;
+    }
+    Ok(())
+}
 
-    // --- Autocomplete popup ---------------------------------------------- //
-    if app.autocomplete {
-        let prefix = if app.input.starts_with('/') {
-            &app.input[1..]
-        } else {
-            &app.input
-        };
-        let filtered = filter_commands(prefix);
+/// Draw the autocomplete popup over the bottom of the log viewport.
+fn render_autocomplete<W: io::Write>(
+    out: &mut W,
+    app: &App,
+    log_bot: u16,
+) -> io::Result<()> {
+    let prefix = if app.input.starts_with('/') {
+        &app.input[1..]
+    } else {
+        &app.input
+    };
+    let filtered = filter_commands(prefix);
+    if filtered.is_empty() {
+        return Ok(());
+    }
+    let max = app.viewport_height().min(10);
+    let show = &filtered[..filtered.len().min(max)];
+    let popup_h = show.len() as u16;
+    let start_row = log_bot.saturating_sub(popup_h.saturating_sub(1));
 
-        if !filtered.is_empty() {
-            let popup_width: u16 = 55;
-            let popup_height = (filtered.len() as u16 + 2).min(14);
-            let inner_width = popup_width.saturating_sub(2) as usize; // minus borders
-            let popup_area = ratatui::layout::Rect {
-                x: chunks[1].x,
-                y: chunks[1].y.saturating_sub(popup_height),
-                width: popup_width,
-                height: popup_height,
-            };
-
-            let accent = Color::Rgb(18, 148, 215); // #1294D7
-            let items: Vec<Line> = filtered
-                .iter()
-                .enumerate()
-                .map(|(i, (name, desc))| {
-                    let (fg, bg) = if i == app.autocomplete_idx {
-                        (Color::White, Color::Rgb(50, 50, 70))
-                    } else {
-                        (Color::Gray, Color::Rgb(20, 20, 30))
-                    };
-                    let text = format!(" /{:<22} {desc}", name);
-                    let padded = format!("{:<width$}", text, width = inner_width);
-                    let cmd_end = 24.min(padded.len());
-                    let mut spans = Vec::new();
-                    spans.push(Span::styled(
-                        padded[..cmd_end].to_string(),
-                        Style::default().fg(accent).bg(bg),
-                    ));
-                    if padded.len() > cmd_end {
-                        spans.push(Span::styled(
-                            padded[cmd_end..].to_string(),
-                            Style::default().fg(fg).bg(bg),
-                        ));
-                    }
-                    Line::from(spans)
-                })
-                .collect();
-
-            let popup = Paragraph::new(items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .title(" Commands ")
-                    .title_style(Style::default().fg(Color::Rgb(18, 148, 215)))
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            );
-
-            f.render_widget(ratatui::widgets::Clear, popup_area);
-            f.render_widget(popup, popup_area);
+    for (i, (name, desc)) in show.iter().enumerate() {
+        let row = start_row + i as u16;
+        if row > log_bot {
+            break;
         }
+        let marker = if i == app.autocomplete_idx { "▸" } else { " " };
+        let bold = if i == app.autocomplete_idx { BOLD } else { "" };
+        let content = format!(
+            " {marker} {bold}{BLUE}/{name:<22}{RESET}  {DIM}{desc}{RESET}",
+        );
+        queue!(out, MoveTo(0, row))?;
+        queue!(out, Print(bordered(&content, app.cols)))?;
+    }
+    Ok(())
+}
+
+// --- Selection & clipboard ---------------------------------------------- //
+
+/// Materialize the current selection as plain text (ANSI stripped).
+fn selection_text(app: &App) -> Option<String> {
+    let (s, e) = app.selection.normalized()?;
+    if !app.selection.active() {
+        return None;
+    }
+    let mut out = String::new();
+    for row in s.row..=e.row {
+        if row >= app.buffer.lines.len() {
+            break;
+        }
+        let line = &app.buffer.lines[row];
+        let vlen = line_visible_len(line);
+        let col_start = if row == s.row { s.col } else { 0 };
+        let col_end = if row == e.row { e.col.min(vlen) } else { vlen };
+        if col_start < col_end {
+            let piece = slice_visible(line, col_start, col_end);
+            out.push_str(&piece);
+        }
+        if row < e.row {
+            out.push('\n');
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
-/// Dispatch a command string to the RPC server and return the output.
+fn copy_to_clipboard(app: &mut App, text: &str) {
+    if let Some(cb) = app.clipboard.as_mut() {
+        let _ = cb.set_text(text.to_owned());
+    }
+    // OSC 52 fallback: set both primary and clipboard selections.
+    // Useful for SSH sessions where arboard can't reach the host.
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    let encoded = STANDARD.encode(text.as_bytes());
+    let _ = io::stdout().write_all(format!("\x1b]52;c;{}\x07", encoded).as_bytes());
+    let _ = io::stdout().flush();
+}
+
+// --- Mouse handling ------------------------------------------------------ //
+
+fn handle_mouse_down(col: u16, row: u16, app: &mut App) {
+    if app.autocomplete {
+        return;
+    }
+    let Some(p) = screen_to_buffer(col, row, app) else {
+        return;
+    };
+
+    let now = Instant::now();
+    let clicked_recently = app
+        .last_click
+        .map(|(lc, lr, lt)| {
+            lc == col && lr == row && now.duration_since(lt).as_millis() <= MULTI_CLICK_MS
+        })
+        .unwrap_or(false);
+    if clicked_recently {
+        app.click_count += 1;
+    } else {
+        app.click_count = 1;
+    }
+    app.last_click = Some((col, row, now));
+
+    match app.click_count {
+        1 => {
+            app.selection.clear();
+            app.selection.anchor = Some(p);
+            app.selection.focus = Some(p);
+            app.selection.dragging = true;
+            app.selection.mode = SelectionMode::Char;
+        }
+        2 => {
+            // Word selection.
+            if let Some(line) = app.buffer.lines.get(p.row) {
+                let (s, e) = word_range(line, p.col);
+                let sp = Point { row: p.row, col: s };
+                let ep = Point { row: p.row, col: e };
+                app.selection.anchor = Some(sp);
+                app.selection.focus = Some(ep);
+                app.selection.dragging = true;
+                app.selection.mode = SelectionMode::Word;
+                app.selection.anchor_span = Some((sp, ep));
+            }
+        }
+        _ => {
+            // Triple or more: whole line.
+            if let Some(line) = app.buffer.lines.get(p.row) {
+                let vlen = line_visible_len(line);
+                let sp = Point { row: p.row, col: 0 };
+                let ep = Point {
+                    row: p.row,
+                    col: vlen,
+                };
+                app.selection.anchor = Some(sp);
+                app.selection.focus = Some(ep);
+                app.selection.dragging = true;
+                app.selection.mode = SelectionMode::Line;
+                app.selection.anchor_span = Some((sp, ep));
+            }
+        }
+    }
+    app.mark_full();
+}
+
+fn handle_mouse_drag(col: u16, row: u16, app: &mut App) {
+    if !app.selection.dragging {
+        return;
+    }
+    // Clamp row to viewport; if outside, also scroll the view.
+    let top = app.log_top();
+    let bot = app.log_bottom();
+    if row < top {
+        app.buffer.scroll_up(1);
+    } else if row > bot {
+        app.buffer.scroll_down(1, app.viewport_height());
+    }
+    let clamped_row = row.clamp(top, bot);
+
+    let Some(p) = screen_to_buffer(col, clamped_row, app) else {
+        return;
+    };
+
+    match app.selection.mode {
+        SelectionMode::Char => {
+            app.selection.focus = Some(p);
+        }
+        SelectionMode::Word => {
+            // Grow the selection away from the anchor span, aligning the
+            // moving edge to word boundaries.
+            let (a_start, a_end) = app.selection.anchor_span.unwrap_or_default();
+            let word = app
+                .buffer
+                .lines
+                .get(p.row)
+                .map(|l| word_range(l, p.col))
+                .unwrap_or((p.col, p.col));
+            let new_point = Point {
+                row: p.row,
+                col: if p.before(&a_start) { word.0 } else { word.1 },
+            };
+            if p.before(&a_start) {
+                app.selection.anchor = Some(a_end);
+                app.selection.focus = Some(new_point);
+            } else {
+                app.selection.anchor = Some(a_start);
+                app.selection.focus = Some(new_point);
+            }
+        }
+        SelectionMode::Line => {
+            let vlen = app
+                .buffer
+                .lines
+                .get(p.row)
+                .map(|l| line_visible_len(l))
+                .unwrap_or(0);
+            let (a_start, a_end) = app.selection.anchor_span.unwrap_or_default();
+            if p.row < a_start.row {
+                app.selection.anchor = Some(a_end);
+                app.selection.focus = Some(Point { row: p.row, col: 0 });
+            } else {
+                app.selection.anchor = Some(a_start);
+                app.selection.focus = Some(Point {
+                    row: p.row,
+                    col: vlen,
+                });
+            }
+        }
+    }
+    app.mark_full();
+}
+
+impl Default for Point {
+    fn default() -> Self {
+        Point { row: 0, col: 0 }
+    }
+}
+
+fn handle_mouse_up(app: &mut App) {
+    if !app.selection.dragging {
+        return;
+    }
+    app.selection.dragging = false;
+    if let Some(text) = selection_text(app) {
+        let t = text.clone();
+        copy_to_clipboard(app, &t);
+    }
+    app.mark_full();
+}
+
+// --- Main REPL ----------------------------------------------------------- //
+
+pub fn run_repl(
+    rpc_addr: &str,
+    log_rx: Receiver<String>,
+    shutdown: Arc<AtomicBool>,
+) -> io::Result<()> {
+    let rt = tokio::runtime::Handle::current();
+    let url = format!("http://{rpc_addr}");
+    let client = jsonrpsee::http_client::HttpClientBuilder::default()
+        .build(&url)
+        .expect("build RPC client");
+
+    let (cols, rows) = terminal::size()?;
+    if rows < CHROME_ROWS + 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "Terminal too small (need at least 6 rows)",
+        ));
+    }
+    let mut app = App::new(cols, rows);
+
+    // Enter the TUI: alternate screen, raw mode, mouse capture,
+    // bracketed paste (so pasted text arrives as Event::Paste, not
+    // as a flood of Char events typed into the input box).
+    enable_raw_mode()?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        Hide,
+    )?;
+
+    // Banner — a single hint line explaining how to drive the TUI.
+    app.push_log(format!(
+        "{DIM}Mouse wheel to scroll · click-drag to select · Tab after / for commands · Ctrl+C to exit{RESET}"
+    ));
+    app.push_log(String::new());
+
+    render_frame(&mut app)?;
+    app.dirty = false;
+
+    let outcome = (|| -> io::Result<()> {
+        loop {
+            // Drain mining / system messages.
+            while let Ok(msg) = log_rx.try_recv() {
+                app.push_log(msg);
+            }
+
+            // Event poll (~20 fps).
+            if event::poll(Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        // Any keypress clears an active selection.
+                        if app.selection.active() {
+                            app.selection.clear();
+                            app.mark_full();
+                        }
+                        if handle_key(key, &mut app, &rt, &client, &shutdown)? {
+                            return Ok(());
+                        }
+                    }
+
+                    Event::Mouse(m) => match m.kind {
+                        MouseEventKind::ScrollUp => {
+                            app.buffer.scroll_up(WHEEL_STEP);
+                            app.mark_full();
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.buffer.scroll_down(WHEEL_STEP, app.viewport_height());
+                            app.mark_full();
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            handle_mouse_down(m.column, m.row, &mut app);
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            handle_mouse_drag(m.column, m.row, &mut app);
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            handle_mouse_up(&mut app);
+                        }
+                        _ => {}
+                    },
+
+                    Event::Resize(nc, nr) => {
+                        app.cols = nc;
+                        app.rows = nr;
+                        let h = app.viewport_height();
+                        if app.buffer.sticky {
+                            app.buffer.scroll_to_bottom(h);
+                        }
+                        app.selection.clear();
+                        app.mark_full();
+                    }
+
+                    // Ignore paste events — the user asked for
+                    // no auto-paste into the input box.  Clipboard
+                    // still works via explicit Ctrl-V in the future.
+                    Event::Paste(_) => {}
+
+                    _ => {}
+                }
+            }
+
+            if app.dirty {
+                if app.full_redraw {
+                    render_frame(&mut app)?;
+                    app.full_redraw = false;
+                } else {
+                    render_input_only(&mut app)?;
+                }
+                app.dirty = false;
+            }
+        }
+    })();
+
+    // Cleanup — always runs, even on error.
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = execute!(
+        io::stdout(),
+        Show,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+    );
+    let _ = disable_raw_mode();
+    outcome
+}
+
+/// Process a key-press event.  Returns `Ok(true)` when the REPL should exit.
+fn handle_key(
+    key: crossterm::event::KeyEvent,
+    app: &mut App,
+    rt: &tokio::runtime::Handle,
+    client: &jsonrpsee::http_client::HttpClient,
+    shutdown: &AtomicBool,
+) -> io::Result<bool> {
+    match key.code {
+        // --- Autocomplete ---------------------------------------------- //
+        KeyCode::Tab if app.input.starts_with('/') => {
+            let prefix = &app.input[1..];
+            let filtered = filter_commands(prefix);
+            if filtered.len() == 1 {
+                app.set_input(format!("/{} ", filtered[0].0));
+                app.autocomplete = false;
+                app.mark_full();
+            } else if !filtered.is_empty() {
+                app.autocomplete = true;
+                app.autocomplete_idx = 0;
+                app.mark_full();
+            }
+        }
+        KeyCode::Enter if app.autocomplete => {
+            let prefix = if app.input.starts_with('/') {
+                &app.input[1..]
+            } else {
+                &app.input
+            };
+            let filtered = filter_commands(prefix);
+            if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
+                app.set_input(format!("/{cmd} "));
+            }
+            app.autocomplete = false;
+            app.mark_full();
+        }
+        KeyCode::Up if app.autocomplete => {
+            app.autocomplete_idx = app.autocomplete_idx.saturating_sub(1);
+            app.mark_full();
+        }
+        KeyCode::Down if app.autocomplete => {
+            let prefix = if app.input.starts_with('/') {
+                &app.input[1..]
+            } else {
+                &app.input
+            };
+            let filtered = filter_commands(prefix);
+            let max = filtered.len().min(10);
+            if app.autocomplete_idx + 1 < max {
+                app.autocomplete_idx += 1;
+            }
+            app.mark_full();
+        }
+        KeyCode::Esc if app.autocomplete => {
+            app.autocomplete = false;
+            app.clear_input();
+            app.mark_full();
+        }
+
+        // --- Execute command ------------------------------------------ //
+        KeyCode::Enter => {
+            let raw = app.input.trim().to_string();
+            app.clear_input();
+            app.history_idx = None;
+            app.autocomplete = false;
+
+            if raw.is_empty() {
+                // nothing
+            } else if !raw.starts_with('/') {
+                app.push_log(format!(
+                    "  {DIM}Commands start with /. Type /help or Tab after /.{RESET}"
+                ));
+            } else {
+                let cmd = raw[1..].trim().to_string();
+                app.history.push(raw);
+                app.push_log(format!("  {BLUE}> /{cmd}{RESET}"));
+
+                if cmd == "exit" || cmd == "quit" {
+                    app.push_log(format!("  {DIM}Goodbye.{RESET}"));
+                    return Ok(true);
+                }
+
+                let output = handle_command(rt, client, &cmd, shutdown);
+                for line in output.lines() {
+                    app.push_log(line.to_string());
+                }
+                app.push_log(String::new());
+
+                if cmd == "stop" {
+                    return Ok(true);
+                }
+            }
+        }
+
+        // --- Scroll via keyboard -------------------------------------- //
+        KeyCode::PageUp => {
+            let h = app.viewport_height();
+            app.buffer.scroll_up(h / 2);
+            app.mark_full();
+        }
+        KeyCode::PageDown => {
+            let h = app.viewport_height();
+            app.buffer.scroll_down(h / 2, h);
+            app.mark_full();
+        }
+
+        // --- Text editing -------------------------------------------- //
+        KeyCode::Char(c) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                return Ok(true);
+            }
+            let was_autocomplete = app.autocomplete;
+            app.insert_char(c);
+            if app.input == "/" {
+                app.autocomplete = true;
+                app.autocomplete_idx = 0;
+                app.mark_full();
+            } else if app.autocomplete {
+                let prefix = if app.input.starts_with('/') {
+                    &app.input[1..]
+                } else {
+                    &app.input
+                };
+                if filter_commands(prefix).is_empty() {
+                    app.autocomplete = false;
+                } else {
+                    app.autocomplete_idx = 0;
+                }
+                app.mark_full();
+            } else if was_autocomplete {
+                app.mark_full();
+            }
+        }
+        KeyCode::Backspace => {
+            let was_autocomplete = app.autocomplete;
+            app.delete_char();
+            if app.input.is_empty() || !app.input.starts_with('/') {
+                app.autocomplete = false;
+                if was_autocomplete {
+                    app.mark_full();
+                }
+            } else if app.autocomplete {
+                let prefix = &app.input[1..];
+                if filter_commands(prefix).is_empty() {
+                    app.autocomplete = false;
+                } else {
+                    app.autocomplete_idx = 0;
+                }
+                app.mark_full();
+            }
+        }
+        KeyCode::Left => {
+            if app.cursor > 0 {
+                let prev = app.input[..app.cursor]
+                    .chars()
+                    .last()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+                app.cursor -= prev;
+                app.dirty = true;
+            }
+        }
+        KeyCode::Right => {
+            if app.cursor < app.input.len() {
+                let next = app.input[app.cursor..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+                app.cursor += next;
+                app.dirty = true;
+            }
+        }
+        KeyCode::Home => {
+            app.cursor = 0;
+            app.dirty = true;
+        }
+        KeyCode::End => {
+            app.cursor = app.input.len();
+            app.dirty = true;
+        }
+
+        // --- Command history ----------------------------------------- //
+        KeyCode::Up => {
+            if !app.history.is_empty() {
+                let idx = match app.history_idx {
+                    Some(i) if i > 0 => i - 1,
+                    Some(i) => i,
+                    None => app.history.len() - 1,
+                };
+                app.history_idx = Some(idx);
+                app.set_input(app.history[idx].clone());
+            }
+        }
+        KeyCode::Down => {
+            if let Some(idx) = app.history_idx {
+                if idx + 1 < app.history.len() {
+                    app.history_idx = Some(idx + 1);
+                    app.set_input(app.history[idx + 1].clone());
+                } else {
+                    app.history_idx = None;
+                    app.clear_input();
+                }
+            }
+        }
+
+        KeyCode::Esc => return Ok(true),
+        _ => {}
+    }
+    Ok(false)
+}
+
+// --- Command handler ----------------------------------------------------- //
+
 fn handle_command(
     rt: &tokio::runtime::Handle,
-    client: &HttpClient,
+    client: &jsonrpsee::http_client::HttpClient,
     cmd: &str,
     shutdown: &AtomicBool,
 ) -> String {
+    use jsonrpsee::core::client::ClientT;
+    use jsonrpsee::rpc_params;
+
     if cmd == "help" {
-        return [
-            "Available commands:",
-            "",
-            "  /getblockchaininfo              Show chain status",
-            "  /getblock <height>              Show block details",
-            "  /getnewaddress                  Generate a new address",
-            "  /getbalance <address>           Show address balance",
-            "  /listaddresses                  List all wallet addresses",
-            "  /sendtoaddress <address> <amt>  Send AIIR to an address",
-            "  /getmempoolinfo                 Show mempool status",
-            "  /mine-start                     Start mining",
-            "  /mine-stop                      Stop mining",
-            "  /addpeer <ip:port>              Connect to a peer node",
-            "  /stop                           Stop the daemon",
-            "  /help                           Show this help",
-            "  /exit                           Exit (Esc also works)",
-        ]
-        .join("\n");
+        let mut lines = vec![format!("  {BOLD}Commands:{RESET}"), String::new()];
+        for (name, desc) in COMMANDS {
+            lines.push(format!(
+                "    {BLUE}/{name:<22}{RESET} {DIM}{desc}{RESET}"
+            ));
+        }
+        return lines.join("\n");
     }
 
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let name = parts[0];
 
-    // --- Validate parameters before sending to RPC ----------------------- //
-
+    // Input validation.
     match name {
-        "getblock" => {
-            if parts.len() < 2 {
-                return "Usage: /getblock <height>\nExample: /getblock 0".into();
-            }
-            if parts[1].parse::<u64>().is_err() {
-                return format!(
-                    "Error: '{}' is not a valid block height. Use a number.",
-                    parts[1]
-                );
-            }
+        "getblock" if parts.len() < 2 => {
+            return format!("  {DIM}Usage: /getblock <height>{RESET}")
         }
-        "getbalance" => {
-            if parts.len() < 2 {
-                return "Usage: /getbalance <address>\nExample: /getbalance aiir1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH".into();
-            }
-            if !parts[1].starts_with("aiir") {
-                return format!(
-                    "Error: '{}' doesn't look like a BitAiir address (must start with 'aiir').",
-                    parts[1]
-                );
-            }
+        "getblock" if parts[1].parse::<u64>().is_err() => {
+            return format!(
+                "  {RED}Error: '{}' is not a valid height.{RESET}",
+                parts[1]
+            )
         }
-        "sendtoaddress" => {
-            if parts.len() < 3 {
-                return "Usage: /sendtoaddress <address> <amount>\nExample: /sendtoaddress aiir1BgG... 10.5".into();
-            }
-            if !parts[1].starts_with("aiir") {
-                return format!("Error: '{}' doesn't look like a BitAiir address.", parts[1]);
-            }
-            match parts[2].parse::<f64>() {
-                Err(_) => return format!("Error: '{}' is not a valid amount.", parts[2]),
-                Ok(v) if v <= 0.0 => return "Error: amount must be greater than 0.".into(),
-                _ => {}
-            }
+        "getbalance" if parts.len() < 2 => {
+            return format!("  {DIM}Usage: /getbalance <address>{RESET}")
         }
-        "mine-start" | "mine-stop" => {
-            // No parameters needed.
+        "getbalance" if !parts[1].starts_with("aiir") => {
+            return format!("  {RED}Error: not a BitAiir address.{RESET}")
         }
-        "addpeer" => {
-            if parts.len() < 2 {
-                return "Usage: /addpeer <ip:port>\nExample: /addpeer 127.0.0.1:8444".into();
-            }
-            if !parts[1].contains(':') {
-                return format!(
-                    "Error: '{}' needs a port. Example: 127.0.0.1:8444",
-                    parts[1]
-                );
-            }
+        "sendtoaddress" if parts.len() < 3 => {
+            return format!(
+                "  {DIM}Usage: /sendtoaddress <addr> <amount>{RESET}"
+            )
+        }
+        "sendtoaddress" if !parts[1].starts_with("aiir") => {
+            return format!("  {RED}Error: not a BitAiir address.{RESET}")
+        }
+        "sendtoaddress" if parts[2].parse::<f64>().unwrap_or(0.0) <= 0.0 => {
+            return format!("  {RED}Error: amount must be > 0.{RESET}")
+        }
+        "addpeer" if parts.len() < 2 || !parts[1].contains(':') => {
+            return format!("  {DIM}Usage: /addpeer <ip:port>{RESET}")
         }
         _ => {}
     }
 
-    // --- Dispatch to RPC ------------------------------------------------- //
-
     let result: Result<serde_json::Value, _> = rt.block_on(async {
         match name {
-            "getblockchaininfo" => client.request("getblockchaininfo", rpc_params![]).await,
+            "getblockchaininfo" => {
+                client.request("getblockchaininfo", rpc_params![]).await
+            }
             "getblock" => {
                 let h: u64 = parts[1].parse().unwrap();
                 client.request("getblock", rpc_params![h]).await
             }
-            "getnewaddress" => client.request("getnewaddress", rpc_params![]).await,
+            "getnewaddress" => {
+                client.request("getnewaddress", rpc_params![]).await
+            }
             "getbalance" => {
                 client
                     .request("getbalance", rpc_params![parts[1].to_string()])
                     .await
             }
+            "listaddresses" => {
+                client.request("listaddresses", rpc_params![]).await
+            }
             "sendtoaddress" => {
                 let amt: f64 = parts[2].parse().unwrap();
                 client
-                    .request("sendtoaddress", rpc_params![parts[1].to_string(), amt])
+                    .request(
+                        "sendtoaddress",
+                        rpc_params![parts[1].to_string(), amt],
+                    )
                     .await
             }
-            "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,
-            "listaddresses" => client.request("listaddresses", rpc_params![]).await,
-            "mine-start" => client.request("setmining", rpc_params![true]).await,
-            "mine-stop" => client.request("setmining", rpc_params![false]).await,
+            "getmempoolinfo" => {
+                client.request("getmempoolinfo", rpc_params![]).await
+            }
+            "mine-start" => {
+                client.request("setmining", rpc_params![true]).await
+            }
+            "mine-stop" => {
+                client.request("setmining", rpc_params![false]).await
+            }
             "addpeer" => {
                 client
                     .request("addpeer", rpc_params![parts[1].to_string()])
@@ -704,25 +1453,28 @@ fn handle_command(
                 client.request("stop", rpc_params![]).await
             }
             _ => Ok(serde_json::json!(format!(
-                "Unknown command: '{name}'. Type /help for available commands."
+                "Unknown: '/{name}'. Type /help."
             ))),
         }
     });
 
     match result {
-        Ok(val) => serde_json::to_string_pretty(&val).unwrap_or_default(),
+        Ok(val) => {
+            let json = serde_json::to_string_pretty(&val).unwrap_or_default();
+            json.lines()
+                .map(|l| format!("  {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
         Err(e) => {
             let msg = e.to_string();
-            // Clean up verbose jsonrpsee error format for friendlier output.
-            if msg.contains("message:") {
-                if let Some(start) = msg.find("message: \"") {
-                    let rest = &msg[start + 10..];
-                    if let Some(end) = rest.find('"') {
-                        return format!("Error: {}", &rest[..end]);
-                    }
+            if let Some(start) = msg.find("message: \"") {
+                let rest = &msg[start + 10..];
+                if let Some(end) = rest.find('"') {
+                    return format!("  {RED}Error: {}{RESET}", &rest[..end]);
                 }
             }
-            format!("Error: {msg}")
+            format!("  {RED}Error: {msg}{RESET}")
         }
     }
 }
