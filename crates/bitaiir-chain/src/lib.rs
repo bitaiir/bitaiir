@@ -53,6 +53,7 @@ pub mod mining;
 pub mod pow;
 pub mod subsidy;
 pub mod target;
+pub mod tx_pow;
 pub mod utxo;
 pub mod validation;
 
@@ -66,5 +67,6 @@ pub use mining::{create_test_genesis, mine_block, mine_block_from_params, requir
 pub use pow::aiir_pow;
 pub use subsidy::{BLOCKS_PER_HALVING, INITIAL_SUBSIDY, TAIL_EMISSION, subsidy};
 pub use target::CompactTarget;
+pub use tx_pow::{mine_tx_pow, validate_tx_pow};
 pub use utxo::UtxoSet;
 pub use validation::{validate_block, validate_transaction};

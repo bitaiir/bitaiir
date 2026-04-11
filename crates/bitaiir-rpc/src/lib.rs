@@ -367,6 +367,9 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             input.signature = sig.clone();
         }
 
+        // Mine the anti-spam proof of work (protocol §6.7).
+        bitaiir_chain::mine_tx_pow(&mut tx);
+
         // Validate the transaction against the UTXO set.
         if let Err(e) = validate_transaction(&tx, &state.utxo) {
             return Err(jsonrpsee::types::ErrorObjectOwned::owned(
@@ -567,6 +570,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         }
 
         let gossip_state = self.state.clone();
+        let gossip_storage: Option<Arc<Storage>> = Some(self.storage.clone());
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -611,6 +615,30 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                                     if !s.mempool.contains(&txid) {
                                         s.mempool.add(tx);
                                         tracing::info!("received tx {txid} from peer {peer_addr}");
+                                    }
+                                }
+                            }
+                            Ok(Some(bitaiir_net::NetMessage::BlockData(bytes))) => {
+                                if let Ok(block) = bitaiir_types::encoding::from_bytes::<bitaiir_types::Block>(&bytes) {
+                                    let mut s = gossip_state.write().await;
+                                    let height = s.chain.height() + 1;
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
+                                    if let Ok(()) = bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200) {
+                                        let spent: Vec<OutPoint> = block.transactions.iter().skip(1)
+                                            .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
+                                            .collect();
+                                        if s.chain.push(block.clone()).is_ok() {
+                                            for tx in &block.transactions {
+                                                let _ = s.utxo.apply_transaction(tx);
+                                            }
+                                            if let Some(storage) = gossip_storage.as_ref() {
+                                                let _ = storage.apply_block(height, &block, &spent);
+                                            }
+                                            tracing::info!("received block {height} from peer {peer_addr}");
+                                        }
                                     }
                                 }
                             }

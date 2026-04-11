@@ -63,7 +63,7 @@ pub(crate) fn sample_coinbase(height: u64) -> Transaction {
 /// transaction's sighash, signed with `test_private_key()`. This
 /// means the transaction will pass full consensus validation
 /// including signature verification.
-pub(crate) fn sample_normal_tx(spend: OutPoint, pow_nonce: u64) -> Transaction {
+pub(crate) fn sample_normal_tx(spend: OutPoint, _pow_nonce: u64) -> Transaction {
     let privkey = test_private_key();
     let pubkey = test_public_key();
 
@@ -80,13 +80,16 @@ pub(crate) fn sample_normal_tx(spend: OutPoint, pow_nonce: u64) -> Transaction {
             recipient_hash: test_recipient_hash(),
         }],
         locktime: 0,
-        pow_nonce,
+        pow_nonce: 0,
     };
 
-    // Sign: compute the sighash (which clears signature + pow_nonce
-    // internally), then produce the ECDSA compact signature.
+    // Sign first (sighash clears pow_nonce internally, so order
+    // doesn't matter, but signing before PoW is the natural flow).
     let sighash = tx.sighash();
     tx.inputs[0].signature = privkey.sign_digest(sighash.as_bytes());
+
+    // Mine the anti-spam PoW nonce.
+    crate::tx_pow::mine_tx_pow(&mut tx);
 
     tx
 }

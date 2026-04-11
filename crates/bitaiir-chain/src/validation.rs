@@ -38,6 +38,7 @@ use crate::error::{Error, Result};
 use crate::pow::aiir_pow;
 use crate::subsidy::subsidy;
 use crate::target::CompactTarget;
+use crate::tx_pow;
 use crate::utxo::UtxoSet;
 
 // -------------------------------------------------------------------------
@@ -79,6 +80,11 @@ pub fn validate_transaction(tx: &Transaction, utxo_set: &UtxoSet) -> Result<()> 
             size,
             max: MAX_TX_SIZE,
         });
+    }
+
+    // Rule: anti-spam proof of work (protocol §6.7).
+    if !tx_pow::validate_tx_pow(tx) {
+        return Err(Error::InvalidTxPow);
     }
 
     // Rule: no duplicate inputs.
@@ -632,8 +638,10 @@ mod tests {
         // includes the outputs).
         let mut tx = sample_normal_tx(spend, 7);
         tx.outputs[0].amount = Amount::from_atomic(200 * 100_000_000);
+        // Re-sign and re-mine PoW after changing outputs.
         let sighash = tx.sighash();
         tx.inputs[0].signature = test_private_key().sign_digest(sighash.as_bytes());
+        crate::tx_pow::mine_tx_pow(&mut tx);
         let err = validate_transaction(&tx, &utxo).unwrap_err();
         assert!(matches!(err, Error::OutputsExceedInputs { .. }));
     }
@@ -647,8 +655,9 @@ mod tests {
             vout: 0,
         };
         let mut tx = sample_normal_tx(spend, 7);
-        // Duplicate the single input.
+        // Duplicate the single input, then re-mine PoW (structure changed).
         tx.inputs.push(tx.inputs[0].clone());
+        crate::tx_pow::mine_tx_pow(&mut tx);
         let err = validate_transaction(&tx, &utxo).unwrap_err();
         assert!(matches!(err, Error::DuplicateInput(_)));
     }

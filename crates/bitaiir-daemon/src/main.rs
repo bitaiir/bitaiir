@@ -447,6 +447,14 @@ async fn main() {
                 if let Err(e) = mining_storage.apply_block(next_height, &block, &spent) {
                     warn!("failed to persist block {next_height}: {e}");
                 }
+
+                // Broadcast the new block to all connected peers.
+                let block_bytes = bitaiir_types::encoding::to_bytes(&block).expect("block encodes");
+                for sender in &s.peer_senders {
+                    let _ = sender.try_send(bitaiir_net::message::NetMessage::BlockData(
+                        block_bytes.clone(),
+                    ));
+                }
             }
 
             // Report the mined block.

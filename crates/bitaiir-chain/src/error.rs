@@ -101,6 +101,10 @@ pub enum Error {
     /// The ECDSA signature in a TxIn is invalid.
     #[error("invalid signature for outpoint {0:?}")]
     InvalidInputSignature(OutPoint),
+
+    /// The transaction's anti-spam pow_nonce does not meet the target.
+    #[error("invalid transaction proof of work (anti-spam nonce)")]
+    InvalidTxPow,
 }
 
 /// Convenience alias.
