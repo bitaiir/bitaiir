@@ -153,7 +153,7 @@ pub fn validate_transaction(tx: &Transaction, utxo_set: &UtxoSet) -> Result<()> 
 ///
 /// 1. Serialized block ≤ `MAX_BLOCK_SIZE`.
 /// 2. `aiir_pow(header) ≤ target(bits)`.
-/// 3. (Skipped in Phase 1c: difficulty bits match expected retarget.)
+/// 3. `bits` field matches the expected difficulty from the retarget algorithm.
 /// 4. Timestamp > median-time-past of the previous 11 blocks.
 /// 5. Timestamp ≤ network_time + `MAX_FUTURE_BLOCK_TIME`.
 /// 6. `prev_block_hash == chain.tip()`.
@@ -195,6 +195,16 @@ pub fn validate_block(
     let target = CompactTarget::from_bits(header.bits);
     if !target.hash_meets_target(pow_hash.as_bytes()) {
         return Err(Error::InsufficientProofOfWork);
+    }
+
+    // Rule 3: difficulty bits must match the expected retarget value.
+    let next_height = chain.height() + 1;
+    let expected_bits = crate::mining::required_bits(chain, next_height);
+    if header.bits != expected_bits {
+        return Err(Error::WrongDifficulty {
+            expected: expected_bits,
+            got: header.bits,
+        });
     }
 
     // Rule 4: timestamp > median-time-past.
