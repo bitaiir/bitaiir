@@ -1,0 +1,31 @@
+# Line-ending policy for the BitAiir repo.
+#
+# rustfmt, cargo, and diffs all behave best when every platform sees
+# exactly the same bytes.  Windows git's default `core.autocrlf=true`
+# used to convert LF → CRLF on checkout, which made `cargo fmt --check`
+# fail on the Windows CI runner.  Declaring `eol=lf` here overrides
+# that per-user setting and pins every text file to LF in the working
+# tree, regardless of OS.
+
+# Default: auto-detect text files and force LF on checkout.
+* text=auto eol=lf
+
+# Rust / config / docs are all text.
+*.rs     text eol=lf
+*.toml   text eol=lf
+*.lock   text eol=lf
+*.md     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+*.sh     text eol=lf
+
+# Explicitly mark binaries so git doesn't try to diff or line-end them.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.psd    binary
+*.zip    binary
+*.gz     binary
