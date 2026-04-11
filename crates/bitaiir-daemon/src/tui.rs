@@ -480,9 +480,9 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
     // --- Scrollbar ------------------------------------------------------- //
     if num_lines > visible_height {
-        let mut scrollbar_state = ScrollbarState::new(num_lines)
-            .position(scroll as usize)
-            .viewport_content_length(visible_height);
+        // Use max_scroll as the total range so the thumb reaches the
+        // very bottom when scroll == max_scroll (auto-scroll position).
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll as usize);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"))
