@@ -338,7 +338,11 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::DarkGray))
                 .title(" BitAiir Core v0.1.0 ")
-                .title_style(Style::default().fg(title_color).add_modifier(Modifier::BOLD)),
+                .title_style(
+                    Style::default()
+                        .fg(title_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
         )
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
@@ -351,7 +355,9 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let input_line = Line::from(vec![
         Span::styled(
             " bitaiir",
-            Style::default().fg(title_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("> ", Style::default().fg(Color::DarkGray)),
         Span::styled(app.input.as_str(), Style::default().fg(Color::White)),
@@ -445,18 +451,19 @@ fn handle_command(
     if cmd == "help" {
         return [
             "Available commands:",
-            "  getblockchaininfo              Show chain status",
-            "  getblock <height>              Show block details",
-            "  getnewaddress                  Generate a new address",
-            "  getbalance <address>           Show address balance",
-            "  sendtoaddress <address> <amt>  Send AIIR",
-            "  getmempoolinfo                 Show mempool status",
-            "  mine start                     Start mining",
-            "  mine stop                      Stop mining",
-            "  addpeer <ip:port>              Connect to a peer",
-            "  stop                           Stop the daemon",
-            "  help                           Show this help",
-            "  exit / quit / Esc              Exit",
+            "",
+            "  /getblockchaininfo              Show chain status",
+            "  /getblock <height>              Show block details",
+            "  /getnewaddress                  Generate a new address",
+            "  /getbalance <address>           Show address balance",
+            "  /sendtoaddress <address> <amt>  Send AIIR to an address",
+            "  /getmempoolinfo                 Show mempool status",
+            "  /mine start                     Start mining",
+            "  /mine stop                      Stop mining",
+            "  /addpeer <ip:port>              Connect to a peer node",
+            "  /stop                           Stop the daemon",
+            "  /help                           Show this help",
+            "  /exit                           Exit (Esc also works)",
         ]
         .join("\n");
     }
@@ -464,52 +471,119 @@ fn handle_command(
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let name = parts[0];
 
+    // --- Validate parameters before sending to RPC ----------------------- //
+
+    match name {
+        "getblock" => {
+            if parts.len() < 2 {
+                return "Usage: /getblock <height>\nExample: /getblock 0".into();
+            }
+            if parts[1].parse::<u64>().is_err() {
+                return format!(
+                    "Error: '{}' is not a valid block height. Use a number.",
+                    parts[1]
+                );
+            }
+        }
+        "getbalance" => {
+            if parts.len() < 2 {
+                return "Usage: /getbalance <address>\nExample: /getbalance aiir1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH".into();
+            }
+            if !parts[1].starts_with("aiir") {
+                return format!(
+                    "Error: '{}' doesn't look like a BitAiir address (must start with 'aiir').",
+                    parts[1]
+                );
+            }
+        }
+        "sendtoaddress" => {
+            if parts.len() < 3 {
+                return "Usage: /sendtoaddress <address> <amount>\nExample: /sendtoaddress aiir1BgG... 10.5".into();
+            }
+            if !parts[1].starts_with("aiir") {
+                return format!("Error: '{}' doesn't look like a BitAiir address.", parts[1]);
+            }
+            match parts[2].parse::<f64>() {
+                Err(_) => return format!("Error: '{}' is not a valid amount.", parts[2]),
+                Ok(v) if v <= 0.0 => return "Error: amount must be greater than 0.".into(),
+                _ => {}
+            }
+        }
+        "mine" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            if action != "start" && action != "stop" {
+                return "Usage: /mine start  or  /mine stop".into();
+            }
+        }
+        "addpeer" => {
+            if parts.len() < 2 {
+                return "Usage: /addpeer <ip:port>\nExample: /addpeer 127.0.0.1:8444".into();
+            }
+            if !parts[1].contains(':') {
+                return format!(
+                    "Error: '{}' needs a port. Example: 127.0.0.1:8444",
+                    parts[1]
+                );
+            }
+        }
+        _ => {}
+    }
+
+    // --- Dispatch to RPC ------------------------------------------------- //
+
     let result: Result<serde_json::Value, _> = rt.block_on(async {
         match name {
             "getblockchaininfo" => client.request("getblockchaininfo", rpc_params![]).await,
             "getblock" => {
-                let h: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let h: u64 = parts[1].parse().unwrap();
                 client.request("getblock", rpc_params![h]).await
             }
             "getnewaddress" => client.request("getnewaddress", rpc_params![]).await,
             "getbalance" => {
-                let a = parts.get(1).copied().unwrap_or("");
                 client
-                    .request("getbalance", rpc_params![a.to_string()])
+                    .request("getbalance", rpc_params![parts[1].to_string()])
                     .await
             }
             "sendtoaddress" => {
-                let a = parts.get(1).copied().unwrap_or("");
-                let amt: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let amt: f64 = parts[2].parse().unwrap();
                 client
-                    .request("sendtoaddress", rpc_params![a.to_string(), amt])
+                    .request("sendtoaddress", rpc_params![parts[1].to_string(), amt])
                     .await
             }
             "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,
             "mine" => {
-                let action = parts.get(1).copied().unwrap_or("status");
-                match action {
-                    "start" => client.request("setmining", rpc_params![true]).await,
-                    "stop" => client.request("setmining", rpc_params![false]).await,
-                    _ => Ok(serde_json::json!("Usage: mine start | mine stop")),
-                }
+                let active = parts[1] == "start";
+                client.request("setmining", rpc_params![active]).await
             }
             "addpeer" => {
-                let a = parts.get(1).copied().unwrap_or("");
-                client.request("addpeer", rpc_params![a.to_string()]).await
+                client
+                    .request("addpeer", rpc_params![parts[1].to_string()])
+                    .await
             }
             "stop" => {
                 shutdown.store(true, Ordering::Relaxed);
                 client.request("stop", rpc_params![]).await
             }
             _ => Ok(serde_json::json!(format!(
-                "Unknown command: '{name}'. Type 'help'."
+                "Unknown command: '{name}'. Type /help for available commands."
             ))),
         }
     });
 
     match result {
         Ok(val) => serde_json::to_string_pretty(&val).unwrap_or_default(),
-        Err(e) => format!("Error: {e}"),
+        Err(e) => {
+            let msg = e.to_string();
+            // Clean up verbose jsonrpsee error format for friendlier output.
+            if msg.contains("message:") {
+                if let Some(start) = msg.find("message: \"") {
+                    let rest = &msg[start + 10..];
+                    if let Some(end) = rest.find('"') {
+                        return format!("Error: {}", &rest[..end]);
+                    }
+                }
+            }
+            format!("Error: {msg}")
+        }
     }
 }
