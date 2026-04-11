@@ -170,19 +170,18 @@ pub fn run_tui(
             if let Event::Mouse(mouse) = &ev {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        let current = app.log_scroll.unwrap_or(if app.logs.len() as u16 > 10 {
-                            app.logs.len() as u16 - 10
-                        } else {
-                            0
-                        });
+                        // Start from current position (or near-bottom if auto-scrolling).
+                        let bottom = app.logs.len().saturating_sub(20) as u16;
+                        let current = app.log_scroll.unwrap_or(bottom);
                         app.log_scroll = Some(current.saturating_sub(3));
                     }
                     MouseEventKind::ScrollDown => {
                         if let Some(s) = app.log_scroll {
-                            let new = s + 3;
-                            let max = app.logs.len() as u16;
-                            app.log_scroll = if new >= max { None } else { Some(new) };
+                            // Scroll down. Setting to None returns to auto-scroll
+                            // only when we're clearly past the bottom.
+                            app.log_scroll = Some(s.saturating_add(3));
                         }
+                        // If None (auto-scroll), do nothing — already at bottom.
                     }
                     _ => {}
                 }
@@ -365,11 +364,10 @@ pub fn run_tui(
                         app.log_scroll = Some(current.saturating_sub(10));
                     }
                     KeyCode::PageDown => {
-                        // Scroll logs down (None = auto-scroll to bottom).
                         if let Some(s) = app.log_scroll {
-                            let new = s + 10;
-                            let max = app.logs.len() as u16;
-                            app.log_scroll = if new >= max { None } else { Some(new) };
+                            app.log_scroll = Some(s.saturating_add(10));
+                            // draw_ui will clamp to auto_scroll, so this
+                            // smoothly reaches the bottom without jumping.
                         }
                     }
                     _ => {}
@@ -446,7 +444,10 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     } else {
         0
     };
-    let scroll = app.log_scroll.unwrap_or(auto_scroll);
+    let scroll = match app.log_scroll {
+        Some(s) => s.min(auto_scroll), // clamp: never scroll past the bottom
+        None => auto_scroll,           // auto-scroll to latest content
+    };
 
     let log_panel = Paragraph::new(log_lines)
         .block(

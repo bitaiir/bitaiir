@@ -78,6 +78,36 @@ async fn main() {
             std::process::exit(1);
         });
 
+    // Validate parameters before sending to the daemon.
+    match &cli.command {
+        Commands::Getbalance { address } => {
+            if !address.starts_with("aiir") {
+                eprintln!(
+                    "Error: '{}' doesn't look like a BitAiir address (must start with 'aiir').",
+                    address
+                );
+                std::process::exit(1);
+            }
+        }
+        Commands::Sendtoaddress { address, amount } => {
+            if !address.starts_with("aiir") {
+                eprintln!("Error: '{}' doesn't look like a BitAiir address.", address);
+                std::process::exit(1);
+            }
+            if *amount <= 0.0 {
+                eprintln!("Error: amount must be greater than 0.");
+                std::process::exit(1);
+            }
+        }
+        Commands::Addpeer { addr } => {
+            if !addr.contains(':') {
+                eprintln!("Error: '{}' needs a port. Example: 127.0.0.1:8444", addr);
+                std::process::exit(1);
+            }
+        }
+        _ => {}
+    }
+
     let result: Result<serde_json::Value, _> = match &cli.command {
         Commands::Getblockchaininfo => client.request("getblockchaininfo", rpc_params![]).await,
         Commands::Getblock { height } => client.request("getblock", rpc_params![*height]).await,
