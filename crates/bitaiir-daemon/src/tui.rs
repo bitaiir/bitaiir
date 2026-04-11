@@ -58,7 +58,9 @@ struct App {
     autocomplete_idx: usize,
     /// Manual scroll offset for the log panel. `None` = auto-scroll
     /// to bottom. `Some(n)` = user scrolled to line `n`.
-    log_scroll: Option<u16>,
+    log_scroll: Option<usize>,
+    /// Visible lines in the log panel (updated each frame).
+    visible_lines: usize,
 }
 
 impl App {
@@ -77,6 +79,7 @@ impl App {
             autocomplete: false,
             autocomplete_idx: 0,
             log_scroll: None,
+            visible_lines: 20,
         }
     }
 
@@ -156,6 +159,11 @@ pub fn run_tui(
             app.push_log(msg);
         }
 
+        // Update visible area size from terminal dimensions.
+        if let Ok(size) = terminal.size() {
+            app.visible_lines = size.height.saturating_sub(5) as usize;
+        }
+
         // Render.
         terminal.draw(|f| draw_ui(f, &app))?;
 
@@ -169,19 +177,17 @@ pub fn run_tui(
 
             // Mouse scroll support.
             if let Event::Mouse(mouse) = &ev {
+                let max_scroll = app.logs.len().saturating_sub(app.visible_lines);
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        // Start from current position (or near-bottom if auto-scrolling).
-                        let bottom = app.logs.len().saturating_sub(20) as u16;
-                        let current = app.log_scroll.unwrap_or(bottom);
+                        let current = app.log_scroll.unwrap_or(max_scroll);
                         app.log_scroll = Some(current.saturating_sub(3));
                     }
                     MouseEventKind::ScrollDown => {
                         if let Some(s) = app.log_scroll {
-                            let new_pos = s.saturating_add(3);
-                            let bottom = app.logs.len().saturating_sub(10) as u16;
-                            if new_pos >= bottom {
-                                app.log_scroll = None; // snap to auto-scroll
+                            let new_pos = s + 3;
+                            if new_pos >= max_scroll {
+                                app.log_scroll = None;
                             } else {
                                 app.log_scroll = Some(new_pos);
                             }
@@ -363,15 +369,15 @@ pub fn run_tui(
                         }
                     }
                     KeyCode::PageUp => {
-                        // Scroll logs up.
-                        let current = app.log_scroll.unwrap_or(0);
+                        let max_scroll = app.logs.len().saturating_sub(app.visible_lines);
+                        let current = app.log_scroll.unwrap_or(max_scroll);
                         app.log_scroll = Some(current.saturating_sub(10));
                     }
                     KeyCode::PageDown => {
                         if let Some(s) = app.log_scroll {
-                            let new_pos = s.saturating_add(10);
-                            let bottom = app.logs.len().saturating_sub(10) as u16;
-                            if new_pos >= bottom {
+                            let max_scroll = app.logs.len().saturating_sub(app.visible_lines);
+                            let new_pos = s + 10;
+                            if new_pos >= max_scroll {
                                 app.log_scroll = None;
                             } else {
                                 app.log_scroll = Some(new_pos);
@@ -445,18 +451,15 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         })
         .collect();
 
-    // Scroll: use manual offset if set, otherwise auto-scroll to bottom.
+    // Scroll position.
     let visible_height = chunks[0].height.saturating_sub(2) as usize;
-    let auto_scroll = if log_lines.len() > visible_height {
-        (log_lines.len() - visible_height) as u16
-    } else {
-        0
-    };
-    let scroll = match app.log_scroll {
-        Some(s) => s.min(auto_scroll), // clamp: never scroll past the bottom
-        None => auto_scroll,           // auto-scroll to latest content
+    let max_scroll = log_lines.len().saturating_sub(visible_height);
+    let scroll: u16 = match app.log_scroll {
+        Some(s) => (s.min(max_scroll)) as u16,
+        None => max_scroll as u16, // auto-scroll to latest content
     };
 
+    let num_lines = log_lines.len();
     let log_panel = Paragraph::new(log_lines)
         .block(
             Block::default()
@@ -476,8 +479,8 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     f.render_widget(log_panel, chunks[0]);
 
     // --- Scrollbar ------------------------------------------------------- //
-    if app.logs.len() > visible_height {
-        let mut scrollbar_state = ScrollbarState::new(app.logs.len())
+    if num_lines > visible_height {
+        let mut scrollbar_state = ScrollbarState::new(num_lines)
             .position(scroll as usize)
             .viewport_content_length(visible_height);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
