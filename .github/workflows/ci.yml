@@ -19,11 +19,16 @@ env:
 
 jobs:
   # -----------------------------------------------------------------------
-  # Formatting — fast, no build needed.
+  # Formatting — runs on every OS so Windows-specific `#[cfg(windows)]`
+  # blocks are also format-checked.
   # -----------------------------------------------------------------------
   fmt:
-    name: rustfmt
-    runs-on: ubuntu-latest
+    name: rustfmt (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,11 +41,17 @@ jobs:
         run: cargo fmt --all -- --check
 
   # -----------------------------------------------------------------------
-  # Clippy — lints with warnings-as-errors.
+  # Clippy — lints with warnings-as-errors, cross-platform.
+  # Needed on Windows in particular so the `winapi` FFI module and any
+  # `#[cfg(windows)]` code actually get linted.
   # -----------------------------------------------------------------------
   clippy:
-    name: clippy
-    runs-on: ubuntu-latest
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +61,7 @@ jobs:
           components: clippy
 
       - name: Install system dependencies (arboard / X11)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -64,11 +76,17 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # -----------------------------------------------------------------------
-  # Tests — the full workspace test suite.
+  # Tests — the full workspace test suite on every supported OS.  Hash
+  # and chain code is deterministic by design, so any cross-platform
+  # drift (crypto, merkle, signing, canonical encoding) shows up here.
   # -----------------------------------------------------------------------
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -76,6 +94,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies (arboard / X11)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
