@@ -30,10 +30,11 @@ const COMMANDS: &[(&str, &str)] = &[
     ("getblock", "Show block at height"),
     ("getnewaddress", "Generate a new address"),
     ("getbalance", "Show address balance"),
+    ("listaddresses", "List all wallet addresses"),
     ("sendtoaddress", "Send AIIR to address"),
     ("getmempoolinfo", "Show mempool status"),
-    ("mine start", "Start mining"),
-    ("mine stop", "Stop mining"),
+    ("mine-start", "Start mining"),
+    ("mine-stop", "Stop mining"),
     ("addpeer", "Connect to a peer"),
     ("stop", "Stop the daemon"),
     ("help", "Show all commands"),
@@ -42,20 +43,18 @@ const COMMANDS: &[(&str, &str)] = &[
 
 /// Application state for the TUI.
 struct App {
-    /// All log lines (mining events, system messages, command output).
     logs: Vec<String>,
-    /// Current input buffer.
     input: String,
-    /// Command history for scrolling with up/down arrows.
+    /// Cursor position within `input` (byte offset).
+    cursor: usize,
     history: Vec<String>,
-    /// Current history index.
     history_idx: Option<usize>,
-    /// Whether to quit.
     should_quit: bool,
-    /// Autocomplete popup visible.
     autocomplete: bool,
-    /// Selected index in the autocomplete popup.
     autocomplete_idx: usize,
+    /// Manual scroll offset for the log panel. `None` = auto-scroll
+    /// to bottom. `Some(n)` = user scrolled to line `n`.
+    log_scroll: Option<u16>,
 }
 
 impl App {
@@ -63,20 +62,55 @@ impl App {
         Self {
             logs: vec![
                 String::new(),
-                "  Type /command or 'help'. Mining: /mine start".into(),
+                "  Type / to see commands. Example: /mine-start".into(),
                 String::new(),
             ],
             input: String::new(),
+            cursor: 0,
             history: Vec::new(),
             history_idx: None,
             should_quit: false,
             autocomplete: false,
             autocomplete_idx: 0,
+            log_scroll: None,
         }
     }
 
     fn push_log(&mut self, line: String) {
         self.logs.push(line);
+        // Auto-scroll to bottom when new content arrives.
+        self.log_scroll = None;
+    }
+
+    /// Insert a character at the cursor position.
+    fn insert_char(&mut self, c: char) {
+        self.input.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    /// Delete the character before the cursor.
+    fn delete_char(&mut self) {
+        if self.cursor > 0 {
+            let prev = self.input[..self.cursor]
+                .chars()
+                .last()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            self.cursor -= prev;
+            self.input.remove(self.cursor);
+        }
+    }
+
+    /// Set the input and move cursor to the end.
+    fn set_input(&mut self, s: String) {
+        self.cursor = s.len();
+        self.input = s;
+    }
+
+    /// Clear the input and reset cursor.
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
     }
 }
 
@@ -133,8 +167,8 @@ pub fn run_tui(
                     continue;
                 }
                 match key.code {
+                    // --- Autocomplete ------------------------------------ //
                     KeyCode::Enter if app.autocomplete => {
-                        // Accept the selected autocomplete entry.
                         let prefix = if app.input.starts_with('/') {
                             &app.input[1..]
                         } else {
@@ -142,24 +176,62 @@ pub fn run_tui(
                         };
                         let filtered = filter_commands(prefix);
                         if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
-                            app.input = format!("/{cmd}");
+                            app.set_input(format!("/{cmd}"));
                         }
                         app.autocomplete = false;
-                        // Don't execute yet — let user add args or press Enter again.
                     }
+                    KeyCode::Tab if app.autocomplete => {
+                        let prefix = if app.input.starts_with('/') {
+                            &app.input[1..]
+                        } else {
+                            &app.input
+                        };
+                        let filtered = filter_commands(prefix);
+                        if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
+                            app.set_input(format!("/{cmd}"));
+                        }
+                        app.autocomplete = false;
+                    }
+                    KeyCode::Up if app.autocomplete => {
+                        app.autocomplete_idx = app.autocomplete_idx.saturating_sub(1);
+                    }
+                    KeyCode::Down if app.autocomplete => {
+                        let prefix = if app.input.starts_with('/') {
+                            &app.input[1..]
+                        } else {
+                            &app.input
+                        };
+                        let filtered = filter_commands(prefix);
+                        if app.autocomplete_idx + 1 < filtered.len() {
+                            app.autocomplete_idx += 1;
+                        }
+                    }
+
+                    // --- Execute command --------------------------------- //
                     KeyCode::Enter => {
-                        // Strip leading "/" if present.
-                        let cmd = app.input.trim().trim_start_matches('/').to_string();
-                        app.input.clear();
+                        let raw = app.input.trim().to_string();
+                        app.clear_input();
                         app.history_idx = None;
                         app.autocomplete = false;
 
-                        if cmd.is_empty() {
+                        if raw.is_empty() {
                             continue;
                         }
 
-                        app.history.push(cmd.clone());
-                        app.push_log(format!("  > {cmd}"));
+                        // Commands must start with "/".
+                        if !raw.starts_with('/') {
+                            app.push_log(format!("  > {raw}"));
+                            app.push_log(
+                                "  Commands must start with /. Type / to see available commands."
+                                    .into(),
+                            );
+                            app.push_log(String::new());
+                            continue;
+                        }
+
+                        let cmd = raw[1..].to_string(); // strip "/"
+                        app.history.push(raw.clone()); // save WITH "/"
+                        app.push_log(format!("  > /{cmd}"));
 
                         if cmd == "exit" || cmd == "quit" {
                             app.should_quit = true;
@@ -176,69 +248,68 @@ pub fn run_tui(
                             app.should_quit = true;
                         }
                     }
+
+                    // --- Text editing ------------------------------------ //
                     KeyCode::Char(c) => {
                         if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                             app.should_quit = true;
                         } else {
-                            app.input.push(c);
-                            // Trigger autocomplete when "/" is the first character.
+                            app.insert_char(c);
                             if app.input == "/" {
                                 app.autocomplete = true;
                                 app.autocomplete_idx = 0;
                             } else if app.autocomplete {
-                                // Update filter, reset selection.
                                 app.autocomplete_idx = 0;
                             }
                         }
                     }
                     KeyCode::Backspace => {
-                        app.input.pop();
+                        app.delete_char();
                         if app.input.is_empty() || !app.input.starts_with('/') {
                             app.autocomplete = false;
                         } else if app.autocomplete {
                             app.autocomplete_idx = 0;
                         }
                     }
+                    KeyCode::Left => {
+                        // Move cursor left by one character.
+                        if app.cursor > 0 {
+                            let prev = app.input[..app.cursor]
+                                .chars()
+                                .last()
+                                .map(|c| c.len_utf8())
+                                .unwrap_or(0);
+                            app.cursor -= prev;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if app.cursor < app.input.len() {
+                            let next = app.input[app.cursor..]
+                                .chars()
+                                .next()
+                                .map(|c| c.len_utf8())
+                                .unwrap_or(0);
+                            app.cursor += next;
+                        }
+                    }
+                    KeyCode::Home => {
+                        app.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        app.cursor = app.input.len();
+                    }
+
+                    // --- Navigation -------------------------------------- //
                     KeyCode::Esc => {
                         if app.autocomplete {
                             app.autocomplete = false;
-                            app.input.clear();
+                            app.clear_input();
                         } else {
                             app.should_quit = true;
                         }
                         continue;
                     }
-                    KeyCode::Tab if app.autocomplete => {
-                        // Tab also accepts the selection (like shell completion).
-                        let prefix = if app.input.starts_with('/') {
-                            &app.input[1..]
-                        } else {
-                            &app.input
-                        };
-                        let filtered = filter_commands(prefix);
-                        if let Some((cmd, _)) = filtered.get(app.autocomplete_idx) {
-                            app.input = format!("/{cmd}");
-                        }
-                        app.autocomplete = false;
-                    }
-                    KeyCode::Up if app.autocomplete => {
-                        if app.autocomplete_idx > 0 {
-                            app.autocomplete_idx -= 1;
-                        }
-                    }
-                    KeyCode::Down if app.autocomplete => {
-                        let prefix = if app.input.starts_with('/') {
-                            &app.input[1..]
-                        } else {
-                            &app.input
-                        };
-                        let filtered = filter_commands(prefix);
-                        if app.autocomplete_idx + 1 < filtered.len() {
-                            app.autocomplete_idx += 1;
-                        }
-                    }
                     KeyCode::Up => {
-                        // Scroll through command history.
                         if !app.history.is_empty() {
                             let idx = match app.history_idx {
                                 Some(i) if i > 0 => i - 1,
@@ -246,18 +317,31 @@ pub fn run_tui(
                                 None => app.history.len() - 1,
                             };
                             app.history_idx = Some(idx);
-                            app.input = app.history[idx].clone();
+                            app.set_input(app.history[idx].clone());
                         }
                     }
                     KeyCode::Down => {
                         if let Some(idx) = app.history_idx {
                             if idx + 1 < app.history.len() {
                                 app.history_idx = Some(idx + 1);
-                                app.input = app.history[idx + 1].clone();
+                                app.set_input(app.history[idx + 1].clone());
                             } else {
                                 app.history_idx = None;
-                                app.input.clear();
+                                app.clear_input();
                             }
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        // Scroll logs up.
+                        let current = app.log_scroll.unwrap_or(0);
+                        app.log_scroll = Some(current.saturating_sub(10));
+                    }
+                    KeyCode::PageDown => {
+                        // Scroll logs down (None = auto-scroll to bottom).
+                        if let Some(s) = app.log_scroll {
+                            let new = s + 10;
+                            let max = app.logs.len() as u16;
+                            app.log_scroll = if new >= max { None } else { Some(new) };
                         }
                     }
                     _ => {}
@@ -323,13 +407,14 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         })
         .collect();
 
-    // Auto-scroll to bottom.
+    // Scroll: use manual offset if set, otherwise auto-scroll to bottom.
     let visible_height = chunks[0].height.saturating_sub(2) as usize;
-    let scroll = if log_lines.len() > visible_height {
+    let auto_scroll = if log_lines.len() > visible_height {
         (log_lines.len() - visible_height) as u16
     } else {
         0
     };
+    let scroll = app.log_scroll.unwrap_or(auto_scroll);
 
     let log_panel = Paragraph::new(log_lines)
         .block(
@@ -372,9 +457,9 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
     f.render_widget(input_bar, chunks[1]);
 
-    // Position the cursor after the prompt + input text.
+    // Position the cursor at the correct position within the input.
     let prompt_len = " bitaiir> ".len() as u16;
-    let cursor_x = chunks[1].x + 1 + prompt_len + app.input.len() as u16;
+    let cursor_x = chunks[1].x + 1 + prompt_len + app.cursor as u16;
     let cursor_y = chunks[1].y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
 
@@ -456,10 +541,11 @@ fn handle_command(
             "  /getblock <height>              Show block details",
             "  /getnewaddress                  Generate a new address",
             "  /getbalance <address>           Show address balance",
+            "  /listaddresses                  List all wallet addresses",
             "  /sendtoaddress <address> <amt>  Send AIIR to an address",
             "  /getmempoolinfo                 Show mempool status",
-            "  /mine start                     Start mining",
-            "  /mine stop                      Stop mining",
+            "  /mine-start                     Start mining",
+            "  /mine-stop                      Stop mining",
             "  /addpeer <ip:port>              Connect to a peer node",
             "  /stop                           Stop the daemon",
             "  /help                           Show this help",
@@ -509,11 +595,8 @@ fn handle_command(
                 _ => {}
             }
         }
-        "mine" => {
-            let action = parts.get(1).copied().unwrap_or("");
-            if action != "start" && action != "stop" {
-                return "Usage: /mine start  or  /mine stop".into();
-            }
+        "mine-start" | "mine-stop" => {
+            // No parameters needed.
         }
         "addpeer" => {
             if parts.len() < 2 {
@@ -551,10 +634,9 @@ fn handle_command(
                     .await
             }
             "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,
-            "mine" => {
-                let active = parts[1] == "start";
-                client.request("setmining", rpc_params![active]).await
-            }
+            "listaddresses" => client.request("listaddresses", rpc_params![]).await,
+            "mine-start" => client.request("setmining", rpc_params![true]).await,
+            "mine-stop" => client.request("setmining", rpc_params![false]).await,
             "addpeer" => {
                 client
                     .request("addpeer", rpc_params![parts[1].to_string()])

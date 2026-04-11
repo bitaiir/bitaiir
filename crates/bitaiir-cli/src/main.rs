@@ -50,6 +50,8 @@ enum Commands {
     },
     /// Show the mempool status.
     Getmempoolinfo,
+    /// List all wallet addresses with balances.
+    Listaddresses,
     /// Start mining.
     #[command(name = "mine-start")]
     MineStart,
@@ -91,6 +93,7 @@ async fn main() {
                 .await
         }
         Commands::Getmempoolinfo => client.request("getmempoolinfo", rpc_params![]).await,
+        Commands::Listaddresses => client.request("listaddresses", rpc_params![]).await,
         Commands::MineStart => client.request("setmining", rpc_params![true]).await,
         Commands::MineStop => client.request("setmining", rpc_params![false]).await,
         Commands::Addpeer { addr } => client.request("addpeer", rpc_params![addr.clone()]).await,

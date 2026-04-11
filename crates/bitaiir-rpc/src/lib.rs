@@ -163,6 +163,10 @@ pub trait BitaiirApi {
     #[method(name = "setmining")]
     async fn set_mining(&self, active: bool) -> RpcResult<String>;
 
+    /// List all wallet addresses with their balances.
+    #[method(name = "listaddresses")]
+    async fn list_addresses(&self) -> RpcResult<serde_json::Value>;
+
     /// Connect to a peer at the given address (ip:port) and perform
     /// the BitAiir handshake.
     #[method(name = "addpeer")]
@@ -398,6 +402,24 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let state = self.state.read().await;
         Ok(serde_json::json!({
             "size": state.mempool.len(),
+        }))
+    }
+
+    async fn list_addresses(&self) -> RpcResult<serde_json::Value> {
+        let state = self.state.read().await;
+        let addresses = state.wallet.addresses();
+        let mut result = Vec::new();
+        for addr in &addresses {
+            let balance = Wallet::balance_of(addr, &state.utxo);
+            result.push(serde_json::json!({
+                "address": addr,
+                "balance": format!("{}", Amount::from_atomic(balance)),
+                "balance_atomic": balance,
+            }));
+        }
+        Ok(serde_json::json!({
+            "addresses": result,
+            "total": addresses.len(),
         }))
     }
 
