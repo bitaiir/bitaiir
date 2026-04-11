@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -22,7 +24,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 
 /// Available slash commands with descriptions.
 const COMMANDS: &[(&str, &str)] = &[
@@ -138,7 +142,7 @@ pub fn run_tui(
     // Setup terminal.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -160,7 +164,31 @@ pub fn run_tui(
 
         // Poll for keyboard events (50ms timeout = ~20 FPS).
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+
+            // Mouse scroll support.
+            if let Event::Mouse(mouse) = &ev {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        let current = app.log_scroll.unwrap_or(if app.logs.len() as u16 > 10 {
+                            app.logs.len() as u16 - 10
+                        } else {
+                            0
+                        });
+                        app.log_scroll = Some(current.saturating_sub(3));
+                    }
+                    MouseEventKind::ScrollDown => {
+                        if let Some(s) = app.log_scroll {
+                            let new = s + 3;
+                            let max = app.logs.len() as u16;
+                            app.log_scroll = if new >= max { None } else { Some(new) };
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Event::Key(key) = ev {
                 // On Windows, crossterm fires both Press and Release
                 // events for each keystroke. Only process Press.
                 if key.kind != crossterm::event::KeyEventKind::Press {
@@ -352,7 +380,11 @@ pub fn run_tui(
 
     // Restore terminal.
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     Ok(())
@@ -433,6 +465,19 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .scroll((scroll, 0));
 
     f.render_widget(log_panel, chunks[0]);
+
+    // --- Scrollbar ------------------------------------------------------- //
+    if app.logs.len() > visible_height {
+        let mut scrollbar_state = ScrollbarState::new(app.logs.len())
+            .position(scroll as usize)
+            .viewport_content_length(visible_height);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
+    }
 
     // --- Input bar ------------------------------------------------------- //
 
