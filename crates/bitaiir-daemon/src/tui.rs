@@ -82,8 +82,9 @@ impl App {
 
     fn push_log(&mut self, line: String) {
         self.logs.push(line);
-        // Auto-scroll to bottom when new content arrives.
-        self.log_scroll = None;
+        // Do NOT reset log_scroll here. If the user scrolled up
+        // manually, let them stay there. Auto-scroll only happens
+        // when log_scroll is None (the initial/default state).
     }
 
     /// Insert a character at the cursor position.
@@ -177,11 +178,14 @@ pub fn run_tui(
                     }
                     MouseEventKind::ScrollDown => {
                         if let Some(s) = app.log_scroll {
-                            // Scroll down. Setting to None returns to auto-scroll
-                            // only when we're clearly past the bottom.
-                            app.log_scroll = Some(s.saturating_add(3));
+                            let new_pos = s.saturating_add(3);
+                            let bottom = app.logs.len().saturating_sub(10) as u16;
+                            if new_pos >= bottom {
+                                app.log_scroll = None; // snap to auto-scroll
+                            } else {
+                                app.log_scroll = Some(new_pos);
+                            }
                         }
-                        // If None (auto-scroll), do nothing — already at bottom.
                     }
                     _ => {}
                 }
@@ -365,9 +369,13 @@ pub fn run_tui(
                     }
                     KeyCode::PageDown => {
                         if let Some(s) = app.log_scroll {
-                            app.log_scroll = Some(s.saturating_add(10));
-                            // draw_ui will clamp to auto_scroll, so this
-                            // smoothly reaches the bottom without jumping.
+                            let new_pos = s.saturating_add(10);
+                            let bottom = app.logs.len().saturating_sub(10) as u16;
+                            if new_pos >= bottom {
+                                app.log_scroll = None;
+                            } else {
+                                app.log_scroll = Some(new_pos);
+                            }
                         }
                     }
                     _ => {}
