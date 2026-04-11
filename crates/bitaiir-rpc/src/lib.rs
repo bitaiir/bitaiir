@@ -32,8 +32,35 @@ pub struct NodeState {
     pub utxo: UtxoSet,
     pub mempool: Mempool,
     pub wallet: Wallet,
-    /// Channels to send messages to connected peers (for tx gossip).
-    pub peer_senders: Vec<tokio::sync::mpsc::Sender<bitaiir_net::NetMessage>>,
+    /// Currently connected peers (inbound + outbound).
+    pub peers: Vec<ConnectedPeer>,
+}
+
+/// One live P2P connection.  Holds both the broadcast channel
+/// (used to relay new blocks and transactions to the peer) and the
+/// metadata we expose via the `listpeers` RPC.
+pub struct ConnectedPeer {
+    pub addr: String,
+    pub user_agent: String,
+    pub best_height: u64,
+    pub direction: PeerDirection,
+    pub connected_at: std::time::Instant,
+    pub sender: tokio::sync::mpsc::Sender<bitaiir_net::NetMessage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerDirection {
+    Inbound,
+    Outbound,
+}
+
+impl PeerDirection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PeerDirection::Inbound => "inbound",
+            PeerDirection::Outbound => "outbound",
+        }
+    }
 }
 
 /// Thread-safe handle to the node state.
@@ -172,6 +199,10 @@ pub trait BitaiirApi {
     #[method(name = "addpeer")]
     async fn add_peer(&self, addr: String) -> RpcResult<serde_json::Value>;
 
+    /// List currently connected peers with their metadata.
+    #[method(name = "listpeers")]
+    async fn list_peers(&self) -> RpcResult<serde_json::Value>;
+
     #[method(name = "stop")]
     async fn stop(&self) -> RpcResult<String>;
 }
@@ -195,6 +226,20 @@ pub struct BitaiirRpcImpl {
     pub shutdown: Arc<AtomicBool>,
     pub mining_active: Arc<AtomicBool>,
     pub storage: Arc<Storage>,
+    /// Optional event channel — when set (interactive mode) RPC
+    /// handlers push human-readable status lines here so the TUI can
+    /// display them alongside mining output.
+    pub events: Option<std::sync::mpsc::Sender<String>>,
+}
+
+impl BitaiirRpcImpl {
+    /// Push a status line to the TUI event channel if one is wired up.
+    /// A dropped receiver (TUI exited) is silently ignored.
+    fn emit(&self, msg: impl Into<String>) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(msg.into());
+        }
+    }
 }
 
 #[async_trait]
@@ -384,10 +429,12 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
         // Broadcast tx to all connected peers before adding to local mempool.
         let tx_bytes = bitaiir_types::encoding::to_bytes(&tx).expect("Transaction always encodes");
-        for sender in &state.peer_senders {
-            let _ = sender.try_send(bitaiir_net::NetMessage::TxData(tx_bytes.clone()));
+        for peer in &state.peers {
+            let _ = peer
+                .sender
+                .try_send(bitaiir_net::NetMessage::TxData(tx_bytes.clone()));
         }
-        let peers_notified = state.peer_senders.len();
+        let peers_notified = state.peers.len();
 
         state.mempool.add(tx);
 
@@ -564,14 +611,30 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let (reader, writer, peer_addr) = peer.into_parts();
         let (tx_send, mut tx_recv) = tokio::sync::mpsc::channel::<bitaiir_net::NetMessage>(100);
 
-        // Register this peer's sender channel in the shared state.
+        // Register this peer's metadata + sender channel in shared state.
+        let peer_addr_key = peer_addr.to_string();
         {
             let mut state = self.state.write().await;
-            state.peer_senders.push(tx_send);
+            state.peers.push(ConnectedPeer {
+                addr: peer_addr_key.clone(),
+                user_agent: their_version.user_agent.clone(),
+                best_height: their_version.best_height,
+                direction: PeerDirection::Outbound,
+                connected_at: std::time::Instant::now(),
+                sender: tx_send,
+            });
         }
+        // Event line for the interactive TUI (plain text — the TUI
+        // doesn't re-parse colors for free-form event strings).
+        self.emit(format!(
+            "  peer connected: {peer_addr_key} (outbound, {}, height {})",
+            their_version.user_agent, their_version.best_height,
+        ));
 
         let gossip_state = self.state.clone();
         let gossip_storage: Option<Arc<Storage>> = Some(self.storage.clone());
+        let gossip_events = self.events.clone();
+        let gossip_peer_key = peer_addr_key.clone();
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -638,6 +701,14 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                                             if let Some(storage) = gossip_storage.as_ref() {
                                                 let _ = storage.apply_block(height, &block, &spent);
                                             }
+                                            // Update this peer's height — they
+                                            // just sent us a block at `height`.
+                                            for p in &mut s.peers {
+                                                if p.addr == gossip_peer_key {
+                                                    p.best_height = p.best_height.max(height);
+                                                    break;
+                                                }
+                                            }
                                             tracing::info!("received block {height} from peer {peer_addr}");
                                         }
                                     }
@@ -659,6 +730,17 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                     }
                 }
             }
+
+            // Peer is gone — remove it from NodeState so it no longer
+            // shows up in `listpeers` and we stop trying to broadcast
+            // to it.  Emit an event line for the TUI.
+            {
+                let mut s = gossip_state.write().await;
+                s.peers.retain(|p| p.addr != gossip_peer_key);
+            }
+            if let Some(ev) = &gossip_events {
+                let _ = ev.send(format!("  peer disconnected: {gossip_peer_key}"));
+            }
         });
 
         Ok(serde_json::json!({
@@ -669,6 +751,28 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             "synced_blocks": synced_blocks,
             "new_height": new_height,
             "status": if synced_blocks > 0 { "connected, synced, gossiping" } else { "connected, gossiping" },
+        }))
+    }
+
+    async fn list_peers(&self) -> RpcResult<serde_json::Value> {
+        let state = self.state.read().await;
+        let now = std::time::Instant::now();
+        let peers: Vec<serde_json::Value> = state
+            .peers
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "addr": p.addr,
+                    "user_agent": p.user_agent,
+                    "height": p.best_height,
+                    "direction": p.direction.as_str(),
+                    "connected_seconds": now.duration_since(p.connected_at).as_secs(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "count": peers.len(),
+            "peers": peers,
         }))
     }
 

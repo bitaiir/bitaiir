@@ -67,6 +67,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("mine-start", "Start mining"),
     ("mine-stop", "Stop mining"),
     ("addpeer", "Connect to a peer"),
+    ("listpeers", "Show connected peers"),
     ("stop", "Stop the daemon"),
     ("help", "Show all commands"),
     ("exit", "Exit BitAiir"),
@@ -1404,6 +1405,7 @@ fn handle_command(
                     .request("addpeer", rpc_params![parts[1].to_string()])
                     .await
             }
+            "listpeers" => client.request("listpeers", rpc_params![]).await,
             "stop" => {
                 shutdown.store(true, Ordering::Relaxed);
                 client.request("stop", rpc_params![]).await

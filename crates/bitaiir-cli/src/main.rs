@@ -63,6 +63,8 @@ enum Commands {
         /// Address of the peer (ip:port).
         addr: String,
     },
+    /// List currently connected peers.
+    Listpeers,
     /// Ask the daemon to shut down gracefully.
     Stop,
 }
@@ -127,6 +129,7 @@ async fn main() {
         Commands::MineStart => client.request("setmining", rpc_params![true]).await,
         Commands::MineStop => client.request("setmining", rpc_params![false]).await,
         Commands::Addpeer { addr } => client.request("addpeer", rpc_params![addr.clone()]).await,
+        Commands::Listpeers => client.request("listpeers", rpc_params![]).await,
         Commands::Stop => client.request("stop", rpc_params![]).await,
     };
 
