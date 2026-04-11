@@ -294,7 +294,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let accent = bitaiir_blue;
     let green = Color::Rgb(80, 200, 120);
     let red = Color::Rgb(240, 80, 80);
-    let yellow = Color::Rgb(255, 200, 60);
+    let title_color = bitaiir_blue;
 
     let log_lines: Vec<Line> = app
         .logs
@@ -338,7 +338,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::DarkGray))
                 .title(" BitAiir Core v0.1.0 ")
-                .title_style(Style::default().fg(yellow).add_modifier(Modifier::BOLD)),
+                .title_style(Style::default().fg(title_color).add_modifier(Modifier::BOLD)),
         )
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
@@ -351,7 +351,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let input_line = Line::from(vec![
         Span::styled(
             " bitaiir",
-            Style::default().fg(yellow).add_modifier(Modifier::BOLD),
+            Style::default().fg(title_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled("> ", Style::default().fg(Color::DarkGray)),
         Span::styled(app.input.as_str(), Style::default().fg(Color::White)),
@@ -425,7 +425,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                     .borders(Borders::ALL)
                     .border_type(ratatui::widgets::BorderType::Rounded)
                     .title(" Commands ")
-                    .title_style(Style::default().fg(Color::Rgb(255, 200, 60)))
+                    .title_style(Style::default().fg(Color::Rgb(18, 148, 215)))
                     .border_style(Style::default().fg(Color::DarkGray)),
             );
 
