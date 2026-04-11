@@ -288,13 +288,13 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
     // --- Log area -------------------------------------------------------- //
 
-    // Muted color palette for a clean, modern look.
+    // Color palette built around the official BitAiir blue #1294D7.
     let dim = Style::default().fg(Color::DarkGray);
-    let accent = Color::Rgb(100, 180, 255); // soft blue
-    let green = Color::Rgb(80, 200, 120); // soft green
-    let red = Color::Rgb(240, 80, 80); // soft red
-    let cyan = Color::Rgb(80, 220, 220); // soft cyan
-    let yellow = Color::Rgb(255, 200, 60); // warm yellow
+    let bitaiir_blue = Color::Rgb(18, 148, 215); // #1294D7 — brand color
+    let accent = bitaiir_blue;
+    let green = Color::Rgb(80, 200, 120);
+    let red = Color::Rgb(240, 80, 80);
+    let yellow = Color::Rgb(255, 200, 60);
 
     let log_lines: Vec<Line> = app
         .logs
@@ -392,7 +392,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
                 height: popup_height,
             };
 
-            let accent = Color::Rgb(100, 180, 255);
+            let accent = Color::Rgb(18, 148, 215); // #1294D7
             let items: Vec<Line> = filtered
                 .iter()
                 .enumerate()
