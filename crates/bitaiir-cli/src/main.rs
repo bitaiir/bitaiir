@@ -50,6 +50,11 @@ enum Commands {
     },
     /// Show the mempool status.
     Getmempoolinfo,
+    /// Look up a transaction by txid.
+    Gettransaction {
+        /// Transaction ID (hex).
+        txid: String,
+    },
     /// List all wallet addresses with balances.
     Listaddresses,
     /// Start mining.
@@ -125,6 +130,11 @@ async fn main() {
                 .await
         }
         Commands::Getmempoolinfo => client.request("getmempoolinfo", rpc_params![]).await,
+        Commands::Gettransaction { txid } => {
+            client
+                .request("gettransaction", rpc_params![txid.clone()])
+                .await
+        }
         Commands::Listaddresses => client.request("listaddresses", rpc_params![]).await,
         Commands::MineStart => client.request("setmining", rpc_params![true]).await,
         Commands::MineStop => client.request("setmining", rpc_params![false]).await,

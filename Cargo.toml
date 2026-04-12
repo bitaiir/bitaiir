@@ -80,7 +80,7 @@ anyhow = "1"
 
 # Test helpers used by integration tests across the workspace.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 hex = "0.4"
 
 # Argon2id memory-hard function, the core of the Proof of Aiir algorithm.

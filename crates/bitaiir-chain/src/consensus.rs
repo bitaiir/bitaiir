@@ -19,6 +19,15 @@ pub const MAX_TX_SIZE: usize = 100_000;
 /// spent (protocol §6.5).
 pub const COINBASE_MATURITY: u64 = 100;
 
+/// Recommended minimum confirmations before a wallet treats a
+/// received output as "confirmed".  This is a **client-side
+/// convention**, not a consensus rule — any output in a mined block
+/// is protocol-valid to spend from block 1.  Wallets, exchanges,
+/// and merchants use this as a safety margin against reorgs.
+///
+/// 12 blocks × 5 s target = ~60 s.
+pub const RECOMMENDED_CONFIRMATIONS: u64 = 12;
+
 /// Number of blocks between difficulty retargets (protocol §8.4).
 /// Set to 20 for fast adaptation in a small network (~100 s at the
 /// target block time). v2 will migrate to per-block LWMA.

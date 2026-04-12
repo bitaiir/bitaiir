@@ -64,6 +64,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("listaddresses", "List all wallet addresses"),
     ("sendtoaddress", "Send AIIR to address"),
     ("getmempoolinfo", "Show mempool status"),
+    ("gettransaction", "Look up tx by txid"),
     ("mine-start", "Start mining"),
     ("mine-stop", "Stop mining"),
     ("addpeer", "Connect to a peer"),
@@ -1384,6 +1385,9 @@ fn handle_command(
         "getbalance" if !parts[1].starts_with("aiir") => {
             Some(format!("  {RED}Error: not a BitAiir address.{RESET}"))
         }
+        "gettransaction" if parts.len() < 2 => {
+            Some(format!("  {DIM}Usage: /gettransaction <txid>{RESET}"))
+        }
         "sendtoaddress" if parts.len() < 3 => Some(format!(
             "  {DIM}Usage: /sendtoaddress <addr> <amount>{RESET}"
         )),
@@ -1408,6 +1412,22 @@ fn handle_command(
     // can exit even if the RPC response never arrives.
     if name == "stop" {
         shutdown.store(true, Ordering::Relaxed);
+    }
+
+    // Instant feedback for slow commands so the user doesn't think the
+    // TUI froze.  The actual result appears when the async task finishes.
+    match name.as_str() {
+        "sendtoaddress" => {
+            let _ = log_tx.send(format!(
+                "  {DIM}Sending transaction (anti-spam PoW ~2s)...{RESET}"
+            ));
+        }
+        "addpeer" => {
+            let _ = log_tx.send(format!(
+                "  {DIM}Connecting to peer (handshake + sync)...{RESET}"
+            ));
+        }
+        _ => {}
     }
 
     // Snapshot everything the async task needs.
@@ -1436,6 +1456,11 @@ fn handle_command(
                     .await
             }
             "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,
+            "gettransaction" => {
+                client
+                    .request("gettransaction", rpc_params![parts[1].clone()])
+                    .await
+            }
             "mine-start" => client.request("setmining", rpc_params![true]).await,
             "mine-stop" => client.request("setmining", rpc_params![false]).await,
             "addpeer" => {

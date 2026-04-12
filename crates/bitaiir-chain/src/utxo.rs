@@ -36,6 +36,11 @@ pub struct UtxoSet {
     /// the output was created so we can enforce the 100-block
     /// maturity rule (protocol §6.5).
     coinbase_heights: HashMap<OutPoint, u64>,
+    /// Block height at which each output was created.  Populated for
+    /// ALL outputs (coinbase and non-coinbase) so the wallet layer
+    /// can compute confirmation counts and display "confirmed" vs.
+    /// "unconfirmed" splits.
+    output_heights: HashMap<OutPoint, u64>,
 }
 
 impl UtxoSet {
@@ -44,6 +49,7 @@ impl UtxoSet {
         Self {
             utxos: HashMap::new(),
             coinbase_heights: HashMap::new(),
+            output_heights: HashMap::new(),
         }
     }
 
@@ -76,6 +82,14 @@ impl UtxoSet {
     /// which it was created. Returns `None` for non-coinbase outputs.
     pub fn coinbase_height(&self, outpoint: &OutPoint) -> Option<u64> {
         self.coinbase_heights.get(outpoint).copied()
+    }
+
+    /// Return the block height at which `outpoint` was created.
+    /// Works for both coinbase and non-coinbase outputs.  Returns
+    /// `None` only if the outpoint is not in the set or was loaded
+    /// from storage without height info (pre-existing chain data).
+    pub fn output_height(&self, outpoint: &OutPoint) -> Option<u64> {
+        self.output_heights.get(outpoint).copied()
     }
 
     /// Insert an output directly, used for bootstrapping or tests.
@@ -112,6 +126,7 @@ impl UtxoSet {
                 continue;
             }
             self.coinbase_heights.remove(&input.prev_out);
+            self.output_heights.remove(&input.prev_out);
             if self.utxos.remove(&input.prev_out).is_none() {
                 return Err(Error::MissingOutpoint(input.prev_out));
             }
@@ -125,6 +140,7 @@ impl UtxoSet {
                 vout: vout as u32,
             };
             self.utxos.insert(outpoint, *txout);
+            self.output_heights.insert(outpoint, height);
             if is_coinbase {
                 self.coinbase_heights.insert(outpoint, height);
             }

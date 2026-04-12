@@ -457,9 +457,10 @@ async fn main() {
                                                         let _ = storage.apply_block(
                                                             height, &block, &spent,
                                                         );
-                                                        // Bump this peer's height
-                                                        // estimate — they just sent
-                                                        // us a block at this height.
+                                                        // Remove confirmed txs from mempool.
+                                                        for tx in block.transactions.iter().skip(1) {
+                                                            s.mempool.remove(&tx.txid());
+                                                        }
                                                         for p in &mut s.peers {
                                                             if p.addr == addr_key {
                                                                 p.best_height =

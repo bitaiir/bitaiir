@@ -64,6 +64,17 @@ impl Address {
         Self(format!("{ADDRESS_PREFIX}{base58_body}"))
     }
 
+    /// Reconstruct a BitAiir address from the 20-byte `hash160`
+    /// recipient hash stored in a `TxOut`.  This is the reverse of the
+    /// decode path: `version_byte || hash → base58check → "aiir" prefix`.
+    pub fn from_recipient_hash(hash: &[u8; 20]) -> Self {
+        let mut payload = Vec::with_capacity(21);
+        payload.push(ADDRESS_VERSION_BYTE);
+        payload.extend_from_slice(hash);
+        let base58_body = base58::encode_check(&payload);
+        Self(format!("{ADDRESS_PREFIX}{base58_body}"))
+    }
+
     /// Borrow the address as a string slice, for printing or comparison.
     pub fn as_str(&self) -> &str {
         &self.0

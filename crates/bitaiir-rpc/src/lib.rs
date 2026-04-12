@@ -15,7 +15,7 @@ use bitaiir_crypto::address::Address;
 use bitaiir_crypto::hash::hash160;
 use bitaiir_crypto::key::{PrivateKey, PublicKey};
 use bitaiir_storage::Storage;
-use bitaiir_types::{Amount, OutPoint, Transaction, TxIn, TxOut};
+use bitaiir_types::{Amount, Hash256, OutPoint, Transaction, TxIn, TxOut};
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::core::async_trait;
 use jsonrpsee::proc_macros::rpc;
@@ -151,7 +151,6 @@ impl Wallet {
             if txout.recipient_hash != recipient_hash {
                 continue;
             }
-            // Skip coinbases that haven't matured yet.
             if let Some(cb_height) = utxo.coinbase_height(outpoint) {
                 if tip_height < cb_height + maturity {
                     continue;
@@ -160,6 +159,53 @@ impl Wallet {
             total = total.saturating_add(txout.amount.to_atomic());
         }
         total
+    }
+
+    /// Balance split into `(confirmed, unconfirmed, immature)`.
+    ///
+    /// - **confirmed**: outputs with >= `RECOMMENDED_CONFIRMATIONS`
+    ///   (12 blocks, ~60 s) and not coinbase-immature.
+    /// - **unconfirmed**: outputs with 1–11 confirmations and not
+    ///   coinbase-immature.
+    /// - **immature**: coinbase outputs with < `COINBASE_MATURITY`
+    ///   (100 blocks).
+    pub fn balance_breakdown(address: &str, utxo: &UtxoSet, tip_height: u64) -> (u64, u64, u64) {
+        let recipient_hash = match address_to_recipient_hash(address) {
+            Some(h) => h,
+            None => return (0, 0, 0),
+        };
+        let maturity = bitaiir_chain::consensus::COINBASE_MATURITY;
+        let rec_confs = bitaiir_chain::consensus::RECOMMENDED_CONFIRMATIONS;
+
+        let mut confirmed: u64 = 0;
+        let mut unconfirmed: u64 = 0;
+        let mut immature: u64 = 0;
+
+        for (outpoint, txout) in utxo.iter() {
+            if txout.recipient_hash != recipient_hash {
+                continue;
+            }
+            let amount = txout.amount.to_atomic();
+
+            // Coinbase maturity check first.
+            if let Some(cb_height) = utxo.coinbase_height(outpoint) {
+                if tip_height < cb_height + maturity {
+                    immature += amount;
+                    continue;
+                }
+            }
+
+            // Confirmation depth.
+            let created = utxo.output_height(outpoint).unwrap_or(0);
+            let confs = tip_height.saturating_sub(created);
+            if confs >= rec_confs {
+                confirmed += amount;
+            } else {
+                unconfirmed += amount;
+            }
+        }
+
+        (confirmed, unconfirmed, immature)
     }
 }
 
@@ -217,6 +263,11 @@ pub trait BitaiirApi {
     #[method(name = "addpeer")]
     async fn add_peer(&self, addr: String) -> RpcResult<serde_json::Value>;
 
+    /// Look up a transaction by its txid (hex).  Checks the mempool
+    /// first (0 confirmations), then scans the chain backwards.
+    #[method(name = "gettransaction")]
+    async fn get_transaction(&self, txid: String) -> RpcResult<serde_json::Value>;
+
     /// List currently connected peers with their metadata.
     #[method(name = "listpeers")]
     async fn list_peers(&self) -> RpcResult<serde_json::Value>;
@@ -252,11 +303,74 @@ pub struct BitaiirRpcImpl {
 
 impl BitaiirRpcImpl {
     /// Push a status line to the TUI event channel if one is wired up.
-    /// A dropped receiver (TUI exited) is silently ignored.
     fn emit(&self, msg: impl Into<String>) {
         if let Some(tx) = &self.events {
             let _ = tx.send(msg.into());
         }
+    }
+
+    /// Build a JSON object describing a transaction.
+    fn format_tx(
+        tx: &Transaction,
+        txid: Hash256,
+        block_info: Option<(u64, Hash256)>,
+        tip: u64,
+        rec_confs: u64,
+    ) -> serde_json::Value {
+        let is_coinbase = tx.is_coinbase();
+        let (status, confirmations, block_height, block_hash) = match block_info {
+            Some((h, bh)) => {
+                let confs = tip.saturating_sub(h);
+                let status = if confs >= rec_confs {
+                    "confirmed"
+                } else {
+                    "unconfirmed"
+                };
+                (status, confs, Some(h), Some(bh.to_string()))
+            }
+            None => ("pending (mempool)", 0, None, None),
+        };
+
+        let inputs: Vec<serde_json::Value> = tx
+            .inputs
+            .iter()
+            .map(|inp| {
+                if inp.prev_out == OutPoint::NULL {
+                    serde_json::json!({ "coinbase": true })
+                } else {
+                    serde_json::json!({
+                        "txid": inp.prev_out.txid.to_string(),
+                        "vout": inp.prev_out.vout,
+                    })
+                }
+            })
+            .collect();
+
+        let outputs: Vec<serde_json::Value> = tx
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, out)| {
+                let addr =
+                    bitaiir_crypto::address::Address::from_recipient_hash(&out.recipient_hash);
+                serde_json::json!({
+                    "vout": i,
+                    "address": addr.as_str(),
+                    "amount": format!("{}", out.amount),
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "txid": txid.to_string(),
+            "status": status,
+            "confirmations": confirmations,
+            "block_height": block_height,
+            "block_hash": block_hash,
+            "is_coinbase": is_coinbase,
+            "inputs": inputs,
+            "outputs": outputs,
+        })
     }
 }
 
@@ -320,15 +434,18 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
     async fn get_balance(&self, address: String) -> RpcResult<serde_json::Value> {
         let state = self.state.read().await;
-        let tip_height = state.chain.height();
-        let total = Wallet::balance_of(&address, &state.utxo);
-        let spendable = Wallet::spendable_balance_of(&address, &state.utxo, tip_height);
-        let immature = total.saturating_sub(spendable);
+        let tip = state.chain.height();
+        let (confirmed, unconfirmed, immature) =
+            Wallet::balance_breakdown(&address, &state.utxo, tip);
+        let spendable = confirmed + unconfirmed;
+        let total = spendable + immature;
         Ok(serde_json::json!({
             "address": address,
-            "total": format!("{}", Amount::from_atomic(total)),
             "spendable": format!("{}", Amount::from_atomic(spendable)),
+            "confirmed": format!("{}", Amount::from_atomic(confirmed)),
+            "unconfirmed": format!("{}", Amount::from_atomic(unconfirmed)),
             "immature": format!("{}", Amount::from_atomic(immature)),
+            "total": format!("{}", Amount::from_atomic(total)),
         }))
     }
 
@@ -529,23 +646,26 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
     async fn list_addresses(&self) -> RpcResult<serde_json::Value> {
         let state = self.state.read().await;
-        let tip_height = state.chain.height();
+        let tip = state.chain.height();
         let addresses = state.wallet.addresses();
         let mut result = Vec::new();
         for addr in &addresses {
-            let total = Wallet::balance_of(addr, &state.utxo);
-            let spendable = Wallet::spendable_balance_of(addr, &state.utxo, tip_height);
-            let immature = total.saturating_sub(spendable);
+            let (confirmed, unconfirmed, immature) =
+                Wallet::balance_breakdown(addr, &state.utxo, tip);
+            let spendable = confirmed + unconfirmed;
+            let total = spendable + immature;
             result.push(serde_json::json!({
                 "address": addr,
-                "total": format!("{}", Amount::from_atomic(total)),
                 "spendable": format!("{}", Amount::from_atomic(spendable)),
+                "confirmed": format!("{}", Amount::from_atomic(confirmed)),
+                "unconfirmed": format!("{}", Amount::from_atomic(unconfirmed)),
                 "immature": format!("{}", Amount::from_atomic(immature)),
+                "total": format!("{}", Amount::from_atomic(total)),
             }));
         }
         Ok(serde_json::json!({
+            "count": addresses.len(),
             "addresses": result,
-            "total": addresses.len(),
         }))
     }
 
@@ -663,6 +783,11 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                             tracing::warn!("failed to persist synced block {height}: {e}");
                         }
 
+                        // Remove confirmed txs from mempool.
+                        for tx in block.transactions.iter().skip(1) {
+                            state.mempool.remove(&tx.txid());
+                        }
+
                         synced_blocks += 1;
                         tracing::info!("synced block {height}");
                     }
@@ -776,8 +901,10 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                                             if let Some(storage) = gossip_storage.as_ref() {
                                                 let _ = storage.apply_block(height, &block, &spent);
                                             }
-                                            // Update this peer's height — they
-                                            // just sent us a block at `height`.
+                                            // Remove confirmed txs from mempool.
+                                            for tx in block.transactions.iter().skip(1) {
+                                                s.mempool.remove(&tx.txid());
+                                            }
                                             for p in &mut s.peers {
                                                 if p.addr == gossip_peer_key {
                                                     p.best_height = p.best_height.max(height);
@@ -827,6 +954,48 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             "new_height": new_height,
             "status": if synced_blocks > 0 { "connected, synced, gossiping" } else { "connected, gossiping" },
         }))
+    }
+
+    async fn get_transaction(&self, txid_hex: String) -> RpcResult<serde_json::Value> {
+        let target = txid_hex.parse::<Hash256>().map_err(|_| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -1,
+                format!("invalid txid: {txid_hex}"),
+                None::<()>,
+            )
+        })?;
+
+        let state = self.state.read().await;
+        let tip = state.chain.height();
+        let rec_confs = bitaiir_chain::consensus::RECOMMENDED_CONFIRMATIONS;
+
+        // Check the mempool first (0 confirmations).
+        if let Some(tx) = state.mempool.get(&target) {
+            return Ok(Self::format_tx(tx, target, None, tip, rec_confs));
+        }
+
+        // Scan the chain backwards (most recent blocks first).
+        for h in (0..=tip).rev() {
+            if let Some(block) = state.chain.block_at(h) {
+                for tx in &block.transactions {
+                    if tx.txid() == target {
+                        return Ok(Self::format_tx(
+                            tx,
+                            target,
+                            Some((h, block.block_hash())),
+                            tip,
+                            rec_confs,
+                        ));
+                    }
+                }
+            }
+        }
+
+        Err(jsonrpsee::types::ErrorObjectOwned::owned(
+            -1,
+            format!("transaction {txid_hex} not found"),
+            None::<()>,
+        ))
     }
 
     async fn list_peers(&self) -> RpcResult<serde_json::Value> {
