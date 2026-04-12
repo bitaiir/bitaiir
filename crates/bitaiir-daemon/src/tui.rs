@@ -282,6 +282,11 @@ struct App {
     last_click: Option<(u16, u16, Instant)>,
     click_count: u32,
     clipboard: Option<arboard::Clipboard>,
+    /// When set, keyboard events are suppressed until this instant.
+    /// Windows Terminal's right-click "paste" bypasses bracketed-paste
+    /// mode and injects clipboard text as raw key events.  We detect
+    /// the right-click and swallow everything for a short window.
+    suppress_keys_until: Option<Instant>,
     /// Unbuffered direct-to-terminal writer (see `open_terminal_writer`).
     term: Option<std::fs::File>,
 }
@@ -304,6 +309,7 @@ impl App {
             last_click: None,
             click_count: 0,
             clipboard: arboard::Clipboard::new().ok(),
+            suppress_keys_until: None,
             term: open_terminal_writer(),
         }
     }
@@ -835,13 +841,6 @@ fn copy_to_clipboard(app: &mut App, text: &str) {
     if let Some(cb) = app.clipboard.as_mut() {
         let _ = cb.set_text(text.to_owned());
     }
-    // OSC 52 fallback: set both primary and clipboard selections.
-    // Useful for SSH sessions where arboard can't reach the host.
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD;
-    let encoded = STANDARD.encode(text.as_bytes());
-    let _ = io::stdout().write_all(format!("\x1b]52;c;{}\x07", encoded).as_bytes());
-    let _ = io::stdout().flush();
 }
 
 // --- Mouse handling ------------------------------------------------------ //
@@ -1048,6 +1047,18 @@ pub fn run_repl(
             if event::poll(Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        // Swallow key events injected by Windows
+                        // Terminal's right-click "paste".  The WT
+                        // paste bypasses bracketed-paste mode and
+                        // arrives as raw Key events, so we suppress
+                        // them for a short window after any right-click.
+                        if let Some(deadline) = app.suppress_keys_until {
+                            if Instant::now() < deadline {
+                                continue;
+                            }
+                            app.suppress_keys_until = None;
+                        }
+
                         // Any keypress clears an active selection.
                         if app.selection.active() {
                             app.selection.clear();
@@ -1075,6 +1086,12 @@ pub fn run_repl(
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
                             handle_mouse_up(&mut app);
+                        }
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            // WT right-click = paste.  Suppress the
+                            // incoming key-event burst for 500 ms.
+                            app.suppress_keys_until =
+                                Some(Instant::now() + Duration::from_millis(500));
                         }
                         _ => {}
                     },
@@ -1233,44 +1250,40 @@ fn handle_key(
             if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                 return Ok(true);
             }
-            let was_autocomplete = app.autocomplete;
             app.insert_char(c);
-            if app.input == "/" {
-                app.autocomplete = true;
-                app.autocomplete_idx = 0;
-                app.mark_full();
-            } else if app.autocomplete {
-                let prefix = if app.input.starts_with('/') {
-                    &app.input[1..]
-                } else {
-                    &app.input
-                };
-                if filter_commands(prefix).is_empty() {
-                    app.autocomplete = false;
-                } else {
+            // Always re-evaluate autocomplete when input starts with /.
+            // This way the popup re-opens as soon as matches exist,
+            // even if it was previously closed by a no-match typo.
+            if app.input.starts_with('/') {
+                let prefix = &app.input[1..];
+                if !filter_commands(prefix).is_empty() {
+                    app.autocomplete = true;
                     app.autocomplete_idx = 0;
+                } else {
+                    app.autocomplete = false;
                 }
                 app.mark_full();
-            } else if was_autocomplete {
+            } else if app.autocomplete {
+                app.autocomplete = false;
                 app.mark_full();
             }
         }
         KeyCode::Backspace => {
-            let was_autocomplete = app.autocomplete;
             app.delete_char();
-            if app.input.is_empty() || !app.input.starts_with('/') {
-                app.autocomplete = false;
-                if was_autocomplete {
-                    app.mark_full();
-                }
-            } else if app.autocomplete {
+            if app.input.starts_with('/') {
                 let prefix = &app.input[1..];
-                if filter_commands(prefix).is_empty() {
-                    app.autocomplete = false;
-                } else {
+                if !filter_commands(prefix).is_empty() {
+                    app.autocomplete = true;
                     app.autocomplete_idx = 0;
+                } else {
+                    app.autocomplete = false;
                 }
                 app.mark_full();
+            } else {
+                if app.autocomplete {
+                    app.autocomplete = false;
+                    app.mark_full();
+                }
             }
         }
         KeyCode::Left => {
