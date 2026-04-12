@@ -7,11 +7,16 @@
 //! same genesis hash and can sync via P2P without needing to share
 //! data directories.
 //!
-//! The genesis coinbase reward (100 AIIR) is paid to a burn address
-//! (`[0x00; 20]`) and is unspendable. This ensures a fair launch:
-//! no one has a head start from the genesis block. The first
+//! The genesis coinbase reward (100 AIIR) is paid to a provably
+//! unspendable "nothing up my sleeve" burn address derived from
+//! `hash160("BitAiir Genesis Burn")`.  Anyone can verify the
+//! derivation; nobody can spend the output because it would require
+//! finding a secp256k1 keypair whose public key hashes to the same
+//! 20-byte value — computationally infeasible.  This ensures a fair
+//! launch: no one has a head start from the genesis block.  The first
 //! spendable coins come from block 1.
 
+use bitaiir_crypto::hash::hash160;
 use bitaiir_types::{Block, BlockHeader, Hash256, OutPoint, Transaction, TxIn, TxOut};
 
 use crate::pow::aiir_pow;
@@ -27,9 +32,13 @@ pub const GENESIS_MESSAGE: &str =
 /// Matches the date of the coinbase headline.
 pub const GENESIS_TIMESTAMP: u64 = 1743206400;
 
-/// The genesis coinbase pays to a burn address. These 100 AIIR are
-/// unspendable — nobody holds the private key for the all-zero hash.
-pub const GENESIS_RECIPIENT_HASH: [u8; 20] = [0u8; 20];
+/// The phrase whose `hash160` produces the genesis burn address.
+///
+/// Verifiable by anyone: `RIPEMD160(SHA256("BitAiir Genesis Burn"))`
+/// yields the `recipient_hash` in the genesis coinbase output.  No
+/// private key was generated or discarded — the address is derived
+/// purely from a public string, so the 100 AIIR are provably burned.
+pub const GENESIS_BURN_PHRASE: &str = "BitAiir Genesis Burn";
 
 /// Build and mine the genesis block. This is called ONCE on the
 /// first startup of a node. Because all inputs are deterministic,
@@ -37,6 +46,7 @@ pub const GENESIS_RECIPIENT_HASH: [u8; 20] = [0u8; 20];
 ///
 /// Mining takes ~5–30 seconds with production Argon2id (64 MiB).
 pub fn mine_genesis() -> Block {
+    let recipient_hash = hash160(GENESIS_BURN_PHRASE.as_bytes());
     let reward = subsidy(0);
     let coinbase = Transaction {
         version: 1,
@@ -48,7 +58,7 @@ pub fn mine_genesis() -> Block {
         }],
         outputs: vec![TxOut {
             amount: reward,
-            recipient_hash: GENESIS_RECIPIENT_HASH,
+            recipient_hash,
         }],
         locktime: 0,
         pow_nonce: 0,

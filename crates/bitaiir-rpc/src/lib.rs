@@ -394,6 +394,11 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         match state.chain.block_at(height) {
             Some(block) => {
                 let header = &block.header;
+                let txids: Vec<String> = block
+                    .transactions
+                    .iter()
+                    .map(|tx| tx.txid().to_string())
+                    .collect();
                 Ok(serde_json::json!({
                     "height": height,
                     "hash": block.block_hash().to_string(),
@@ -403,6 +408,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                     "bits": format!("{:#010x}", header.bits),
                     "nonce": header.nonce,
                     "transactions": block.transactions.len(),
+                    "txids": txids,
                     "coinbase_reward": block.transactions.first()
                         .map(|tx| {
                             let total: u64 = tx.outputs.iter()
