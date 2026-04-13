@@ -86,6 +86,30 @@ impl Storage {
         Ok(Self { db })
     }
 
+    // --- Generic metadata ------------------------------------------------ //
+
+    /// Read a metadata value by key.
+    pub fn get_metadata(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(METADATA) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(table.get(key)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Write a metadata value by key.
+    pub fn set_metadata(&self, key: &str, value: &[u8]) -> Result<()> {
+        let write = self.db.begin_write()?;
+        {
+            let mut table = write.open_table(METADATA)?;
+            table.insert(key, value)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     /// Whether the database already has a stored chain (at least one block).
     pub fn has_chain(&self) -> Result<bool> {
         let read = self.db.begin_read()?;
@@ -236,7 +260,7 @@ impl Storage {
 
     // --- Wallet ---------------------------------------------------------- //
 
-    /// Save a wallet keypair.
+    /// Save a wallet keypair (plaintext format).
     pub fn save_wallet_key(
         &self,
         address: &str,
@@ -254,6 +278,33 @@ impl Storage {
         }
         write.commit()?;
         Ok(())
+    }
+
+    /// Save a wallet key entry as raw bytes (for encrypted storage).
+    pub fn save_wallet_key_raw(&self, address: &str, value: &[u8]) -> Result<()> {
+        let write = self.db.begin_write()?;
+        {
+            let mut table = write.open_table(WALLET_KEYS)?;
+            table.insert(address, value)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Load all wallet key entries as raw bytes (for encrypted wallets).
+    pub fn load_wallet_keys_raw(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(WALLET_KEYS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            result.push((key.value().to_string(), value.value().to_vec()));
+        }
+        Ok(result)
     }
 
     /// Load all wallet keypairs.

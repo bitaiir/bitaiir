@@ -83,6 +83,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 hex = "0.4"
 
+# AES-256-GCM authenticated encryption for wallet key protection.
+aes-gcm = "0.10"
+
 # Argon2id memory-hard function, the core of the Proof of Aiir algorithm.
 # Pure Rust (no C bindings), works on Windows out of the box.
 argon2 = "0.5"

@@ -141,15 +141,62 @@ async fn main() {
             // Load wallet keys.
             let wallet_keys = storage.load_wallet_keys().expect("load wallet keys");
             let mut wallet = Wallet::new();
-            // Re-populate wallet from stored keys.
-            for (addr, (privkey, pubkey)) in &wallet_keys {
-                wallet.import_key(addr.clone(), privkey.clone(), *pubkey);
+
+            // Check if the wallet is encrypted before trying to
+            // import plaintext keys.
+            let is_encrypted = storage
+                .get_metadata("wallet_encrypted")
+                .ok()
+                .flatten()
+                .map(|v| v == [1])
+                .unwrap_or(false);
+
+            if is_encrypted {
+                // Wallet is encrypted: load raw entries to register
+                // addresses and extract pubkeys (unencrypted tail).
+                // The private keys stay encrypted until the user
+                // calls /walletpassphrase.
+                let raw_keys = storage.load_wallet_keys_raw().expect("load wallet keys");
+                for (addr, bytes) in &raw_keys {
+                    wallet.register_address(addr.clone());
+                    // Encrypted: nonce(12) + ciphertext(48) + pubkey(33) = 93
+                    // We can still read the pubkey from the tail.
+                    if bytes.len() >= 93 {
+                        // pubkey is at bytes[60..93] — NOT encrypted.
+                        // We'll use it for the miner address if needed.
+                    }
+                }
+                println!("  Wallet is encrypted ({} address(es)).", raw_keys.len());
+                println!("  Use /walletpassphrase <pass> <timeout> to unlock.");
+            } else {
+                // Unencrypted: import all keys normally.
+                for (addr, (privkey, pubkey)) in &wallet_keys {
+                    wallet.import_key(addr.clone(), privkey.clone(), *pubkey);
+                }
             }
 
             // Use the first wallet address as the miner address.
             let miner_hash = if let Some(addr) = wallet.addresses().first() {
-                let (_, pk) = wallet.get_keys(addr).unwrap();
-                hash160(&pk.to_compressed())
+                if let Some((_, pk)) = wallet.get_keys(addr) {
+                    hash160(&pk.to_compressed())
+                } else if is_encrypted {
+                    // Wallet is locked — try to extract the pubkey
+                    // from the encrypted raw entry.
+                    let raw = storage.load_wallet_keys_raw().unwrap_or_default();
+                    if let Some((_, bytes)) = raw.first() {
+                        if bytes.len() >= 93 {
+                            let mut pk_bytes = [0u8; 33];
+                            pk_bytes.copy_from_slice(&bytes[60..93]);
+                            hash160(&pk_bytes)
+                        } else {
+                            [0u8; 20] // fallback — won't mine correctly
+                        }
+                    } else {
+                        [0u8; 20]
+                    }
+                } else {
+                    [0u8; 20]
+                }
             } else {
                 // No wallet keys stored — generate a new one.
                 let addr = wallet.generate_address();
@@ -262,6 +309,14 @@ async fn main() {
             });
     }
 
+    // Check if the wallet on disk is encrypted.
+    let wallet_encrypted = storage
+        .get_metadata("wallet_encrypted")
+        .ok()
+        .flatten()
+        .map(|v| v == [1])
+        .unwrap_or(false);
+
     let state: SharedState = Arc::new(RwLock::new(NodeState {
         chain,
         utxo,
@@ -269,6 +324,11 @@ async fn main() {
         wallet,
         peers: Vec::new(),
         known_peers,
+        wallet_encrypted,
+        // Unencrypted wallets start unlocked; encrypted wallets start
+        // locked — the user must call /walletpassphrase to unlock.
+        wallet_unlocked: !wallet_encrypted,
+        wallet_lock_at: 0,
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));

@@ -6,6 +6,8 @@
 //! translates RPC calls into reads/writes on the chain, UTXO set,
 //! mempool, and wallet.
 
+pub mod wallet_crypto;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,9 +37,15 @@ pub struct NodeState {
     /// Currently connected peers (inbound + outbound).
     pub peers: Vec<ConnectedPeer>,
     /// All peers we've ever heard about (manual, gossip, seeds).
-    /// Keyed by `"ip:port"`.  The `PeerManager` reads this to decide
-    /// which peers to reconnect to.
     pub known_peers: std::collections::HashMap<String, KnownPeer>,
+    /// Whether the wallet on disk is encrypted.
+    pub wallet_encrypted: bool,
+    /// Whether the wallet is currently unlocked (keys in memory).
+    /// `true` = can sign. `false` = read-only (balances visible,
+    /// sending blocked).  Unencrypted wallets are always unlocked.
+    pub wallet_unlocked: bool,
+    /// When the wallet should auto-lock (Unix timestamp, 0 = never).
+    pub wallet_lock_at: u64,
 }
 
 /// One live P2P connection.
@@ -168,8 +176,12 @@ pub type SharedState = Arc<RwLock<NodeState>>;
 /// A simple in-memory wallet that stores keypairs and can build
 /// signed transactions. No persistence — keys are lost on restart.
 pub struct Wallet {
-    /// Map from address string ("aiir...") to (private_key, public_key, compressed).
+    /// Map from address string ("aiir...") to (private_key, public_key).
     keys: HashMap<String, (PrivateKey, PublicKey)>,
+    /// All addresses that belong to this wallet.  Persists across
+    /// lock/unlock so `listaddresses` and balance queries still work
+    /// when the wallet is locked.
+    all_addresses: Vec<String>,
 }
 
 impl Default for Wallet {
@@ -182,6 +194,7 @@ impl Wallet {
     pub fn new() -> Self {
         Self {
             keys: HashMap::new(),
+            all_addresses: Vec::new(),
         }
     }
 
@@ -192,12 +205,27 @@ impl Wallet {
         let address = Address::from_compressed_public_key(&pubkey);
         let addr_str = address.as_str().to_string();
         self.keys.insert(addr_str.clone(), (privkey, pubkey));
+        if !self.all_addresses.contains(&addr_str) {
+            self.all_addresses.push(addr_str.clone());
+        }
         addr_str
     }
 
     /// Import an existing keypair (used when loading from storage).
     pub fn import_key(&mut self, address: String, privkey: PrivateKey, pubkey: PublicKey) {
+        if !self.all_addresses.contains(&address) {
+            self.all_addresses.push(address.clone());
+        }
         self.keys.insert(address, (privkey, pubkey));
+    }
+
+    /// Register an address without a keypair (for locked wallets
+    /// that loaded addresses from storage but haven't decrypted
+    /// the keys yet).
+    pub fn register_address(&mut self, address: String) {
+        if !self.all_addresses.contains(&address) {
+            self.all_addresses.push(address);
+        }
     }
 
     /// Look up a keypair by address.
@@ -205,9 +233,15 @@ impl Wallet {
         self.keys.get(address)
     }
 
-    /// List all addresses in the wallet.
+    /// List all addresses in the wallet (works even when locked).
     pub fn addresses(&self) -> Vec<String> {
-        self.keys.keys().cloned().collect()
+        self.all_addresses.clone()
+    }
+
+    /// Clear all private keys from memory (lock the wallet).
+    /// Addresses are preserved so balance queries still work.
+    pub fn clear_keys(&mut self) {
+        self.keys.clear();
     }
 
     /// Scan the UTXO set for outputs belonging to a given address
@@ -371,6 +405,20 @@ pub trait BitaiirApi {
     #[method(name = "listknownpeers")]
     async fn list_known_peers(&self) -> RpcResult<serde_json::Value>;
 
+    /// Encrypt the wallet with a passphrase.  All private keys are
+    /// re-encrypted on disk.  The wallet stays unlocked after this
+    /// call.  Subsequent restarts will require the passphrase.
+    #[method(name = "encryptwallet")]
+    async fn encrypt_wallet(&self, passphrase: String) -> RpcResult<String>;
+
+    /// Unlock an encrypted wallet for `timeout` seconds.
+    #[method(name = "walletpassphrase")]
+    async fn wallet_passphrase(&self, passphrase: String, timeout: u64) -> RpcResult<String>;
+
+    /// Lock the wallet immediately.
+    #[method(name = "walletlock")]
+    async fn wallet_lock(&self) -> RpcResult<String>;
+
     #[method(name = "stop")]
     async fn stop(&self) -> RpcResult<String>;
 }
@@ -402,9 +450,9 @@ pub struct BitaiirRpcImpl {
 
 impl BitaiirRpcImpl {
     /// Push a status line to the TUI event channel if one is wired up.
-    fn emit(&self, msg: impl Into<String>) {
+    fn emit(&self, msg: String) {
         if let Some(tx) = &self.events {
-            let _ = tx.send(msg.into());
+            let _ = tx.send(msg);
         }
     }
 
@@ -559,6 +607,43 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         to_address: String,
         amount: f64,
     ) -> RpcResult<serde_json::Value> {
+        // Check wallet lock state.
+        {
+            let state = self.state.read().await;
+            if state.wallet_encrypted && !state.wallet_unlocked {
+                return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                    -13,
+                    "wallet is locked, use /walletpassphrase to unlock",
+                    None::<()>,
+                ));
+            }
+            // Auto-lock if timeout expired.
+            if state.wallet_lock_at > 0 && unix_now() >= state.wallet_lock_at {
+                drop(state);
+                let mut state = self.state.write().await;
+                state.wallet.clear_keys();
+                state.wallet_unlocked = false;
+                state.wallet_lock_at = 0;
+                return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                    -13,
+                    "wallet auto-locked (timeout expired), use /walletpassphrase",
+                    None::<()>,
+                ));
+            }
+        }
+
+        // Reject sending to your own wallet.
+        {
+            let state = self.state.read().await;
+            if state.wallet.addresses().contains(&to_address) {
+                return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                    -6,
+                    "cannot send to your own address",
+                    None::<()>,
+                ));
+            }
+        }
+
         let amount_atoms = (amount * 100_000_000.0) as u64;
 
         let to_recipient_hash = address_to_recipient_hash(&to_address).ok_or_else(|| {
@@ -1166,6 +1251,166 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             "count": peers.len(),
             "peers": peers,
         }))
+    }
+
+    async fn encrypt_wallet(&self, passphrase: String) -> RpcResult<String> {
+        let mut state = self.state.write().await;
+        if state.wallet_encrypted {
+            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                -10,
+                "wallet is already encrypted",
+                None::<()>,
+            ));
+        }
+
+        // Derive the AES key from the passphrase.
+        let salt = wallet_crypto::random_salt();
+        let key = wallet_crypto::derive_key(passphrase.as_bytes(), &salt);
+
+        // Re-encrypt every private key on disk.
+        let addresses = state.wallet.addresses();
+        for addr in &addresses {
+            let (privkey, pubkey) = state.wallet.get_keys(addr).expect("key exists").clone();
+            let encrypted = wallet_crypto::encrypt_privkey(&key, &privkey.to_bytes());
+            // Store: encrypted_privkey + pubkey (unencrypted).
+            let mut value = Vec::with_capacity(encrypted.len() + 33);
+            value.extend_from_slice(&encrypted);
+            value.extend_from_slice(&pubkey.to_compressed());
+            self.storage
+                .save_wallet_key_raw(addr, &value)
+                .map_err(|e| {
+                    jsonrpsee::types::ErrorObjectOwned::owned(
+                        -11,
+                        format!("storage error: {e}"),
+                        None::<()>,
+                    )
+                })?;
+        }
+
+        // Store salt and check blob in metadata.
+        let check = wallet_crypto::create_check_blob(&key);
+        let _ = self.storage.set_metadata("wallet_salt", &salt);
+        let _ = self.storage.set_metadata("wallet_check", &check);
+        let _ = self.storage.set_metadata("wallet_encrypted", &[1]);
+
+        state.wallet_encrypted = true;
+        state.wallet_unlocked = true; // stays unlocked after encryption
+
+        self.emit("  Wallet encrypted successfully.".to_string());
+        Ok(format!(
+            "wallet encrypted ({} key(s)). Remember your passphrase!",
+            addresses.len()
+        ))
+    }
+
+    async fn wallet_passphrase(&self, passphrase: String, timeout: u64) -> RpcResult<String> {
+        let mut state = self.state.write().await;
+        if !state.wallet_encrypted {
+            return Ok("wallet is not encrypted".to_string());
+        }
+        if state.wallet_unlocked {
+            // Just extend the timeout.
+            state.wallet_lock_at = if timeout == 0 {
+                0
+            } else {
+                unix_now() + timeout
+            };
+            return Ok(format!(
+                "wallet already unlocked (timeout extended to {timeout}s)"
+            ));
+        }
+
+        // Load salt and verify passphrase.
+        let salt = self
+            .storage
+            .get_metadata("wallet_salt")
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    -12,
+                    "wallet salt not found in storage",
+                    None::<()>,
+                )
+            })?;
+        let check = self
+            .storage
+            .get_metadata("wallet_check")
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    -12,
+                    "wallet check blob not found in storage",
+                    None::<()>,
+                )
+            })?;
+
+        let key = wallet_crypto::derive_key(passphrase.as_bytes(), &salt);
+        if !wallet_crypto::verify_check_blob(&key, &check) {
+            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                -13,
+                "incorrect passphrase",
+                None::<()>,
+            ));
+        }
+
+        // Decrypt all private keys from storage into the in-memory wallet.
+        let stored_keys = self.storage.load_wallet_keys_raw().map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -11,
+                format!("storage error: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        for (addr, bytes) in &stored_keys {
+            // Encrypted format: encrypted_privkey(60) + pubkey(33) = 93
+            if bytes.len() < 60 + 33 {
+                continue;
+            }
+            let encrypted_privkey = &bytes[..60];
+            let pubkey_bytes = &bytes[60..];
+
+            let privkey_bytes = wallet_crypto::decrypt_privkey(&key, encrypted_privkey)
+                .ok_or_else(|| {
+                    jsonrpsee::types::ErrorObjectOwned::owned(
+                        -13,
+                        format!("failed to decrypt key for {addr}"),
+                        None::<()>,
+                    )
+                })?;
+
+            if let (Ok(privkey), Ok(pubkey)) = (
+                bitaiir_crypto::key::PrivateKey::from_bytes(&privkey_bytes),
+                bitaiir_crypto::key::PublicKey::from_slice(pubkey_bytes),
+            ) {
+                state.wallet.import_key(addr.clone(), privkey, pubkey);
+            }
+        }
+
+        state.wallet_unlocked = true;
+        state.wallet_lock_at = if timeout == 0 {
+            0
+        } else {
+            unix_now() + timeout
+        };
+
+        self.emit("  Wallet unlocked.".to_string());
+        Ok(format!("wallet unlocked for {timeout}s"))
+    }
+
+    async fn wallet_lock(&self) -> RpcResult<String> {
+        let mut state = self.state.write().await;
+        if !state.wallet_encrypted {
+            return Ok("wallet is not encrypted, nothing to lock".to_string());
+        }
+        // Clear private keys from memory.
+        state.wallet.clear_keys();
+        state.wallet_unlocked = false;
+        state.wallet_lock_at = 0;
+        self.emit("  Wallet locked.".to_string());
+        Ok("wallet locked".to_string())
     }
 
     async fn stop(&self) -> RpcResult<String> {

@@ -70,6 +70,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("addpeer", "Connect to a peer"),
     ("listpeers", "Show connected peers"),
     ("listknownpeers", "Show all known peers"),
+    ("encryptwallet", "Encrypt wallet with passphrase"),
+    ("walletpassphrase", "Unlock wallet for N seconds"),
+    ("walletlock", "Lock wallet immediately"),
     ("stop", "Stop the daemon"),
     ("help", "Show all commands"),
     ("exit", "Exit BitAiir"),
@@ -1411,6 +1414,12 @@ fn handle_command(
         "sendtoaddress" if parts[2].parse::<f64>().unwrap_or(0.0) <= 0.0 => {
             Some(format!("  {RED}Error: amount must be > 0.{RESET}"))
         }
+        "encryptwallet" if parts.len() < 2 => {
+            Some(format!("  {DIM}Usage: /encryptwallet <passphrase>{RESET}"))
+        }
+        "walletpassphrase" if parts.len() < 3 => Some(format!(
+            "  {DIM}Usage: /walletpassphrase <passphrase> <timeout_seconds>{RESET}"
+        )),
         "addpeer" if parts.len() < 2 || !parts[1].contains(':') => {
             Some(format!("  {DIM}Usage: /addpeer <ip:port>{RESET}"))
         }
@@ -1484,6 +1493,18 @@ fn handle_command(
             }
             "listpeers" => client.request("listpeers", rpc_params![]).await,
             "listknownpeers" => client.request("listknownpeers", rpc_params![]).await,
+            "encryptwallet" => {
+                client
+                    .request("encryptwallet", rpc_params![parts[1].clone()])
+                    .await
+            }
+            "walletpassphrase" => {
+                let timeout: u64 = parts[2].parse().unwrap_or(60);
+                client
+                    .request("walletpassphrase", rpc_params![parts[1].clone(), timeout])
+                    .await
+            }
+            "walletlock" => client.request("walletlock", rpc_params![]).await,
             "stop" => client.request("stop", rpc_params![]).await,
             other => Ok(serde_json::json!(format!(
                 "Unknown: '/{other}'. Type /help."

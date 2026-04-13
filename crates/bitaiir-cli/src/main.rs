@@ -72,6 +72,21 @@ enum Commands {
     Listpeers,
     /// List all known peer addresses (connected or not).
     Listknownpeers,
+    /// Encrypt the wallet with a passphrase.
+    Encryptwallet {
+        /// The passphrase to encrypt with.
+        passphrase: String,
+    },
+    /// Unlock the wallet for a number of seconds.
+    Walletpassphrase {
+        /// The wallet passphrase.
+        passphrase: String,
+        /// Seconds to keep unlocked (default: 60).
+        #[arg(default_value_t = 60)]
+        timeout: u64,
+    },
+    /// Lock the wallet immediately.
+    Walletlock,
     /// Ask the daemon to shut down gracefully.
     Stop,
 }
@@ -143,6 +158,23 @@ async fn main() {
         Commands::Addpeer { addr } => client.request("addpeer", rpc_params![addr.clone()]).await,
         Commands::Listpeers => client.request("listpeers", rpc_params![]).await,
         Commands::Listknownpeers => client.request("listknownpeers", rpc_params![]).await,
+        Commands::Encryptwallet { passphrase } => {
+            client
+                .request("encryptwallet", rpc_params![passphrase.clone()])
+                .await
+        }
+        Commands::Walletpassphrase {
+            passphrase,
+            timeout,
+        } => {
+            client
+                .request(
+                    "walletpassphrase",
+                    rpc_params![passphrase.clone(), *timeout],
+                )
+                .await
+        }
+        Commands::Walletlock => client.request("walletlock", rpc_params![]).await,
         Commands::Stop => client.request("stop", rpc_params![]).await,
     };
 
