@@ -10,6 +10,17 @@ use jsonrpsee::rpc_params;
 
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8443";
 
+/// Full validation of a BitAiir address: prefix + base58check + length.
+fn is_valid_address(addr: &str) -> bool {
+    let Some(body) = addr.strip_prefix("aiir") else {
+        return false;
+    };
+    let Ok(decoded) = bitaiir_crypto::base58::decode_check(body) else {
+        return false;
+    };
+    decoded.len() == 21
+}
+
 #[derive(Parser)]
 #[command(
     name = "bitaiir-cli",
@@ -47,6 +58,11 @@ enum Commands {
         address: String,
         /// Amount in AIIR (e.g. 10.5).
         amount: f64,
+    },
+    /// Show transaction history for an address.
+    Gettransactionhistory {
+        /// BitAiir address to query.
+        address: String,
     },
     /// Show the mempool status.
     Getmempoolinfo,
@@ -105,17 +121,20 @@ async fn main() {
     // Validate parameters before sending to the daemon.
     match &cli.command {
         Commands::Getbalance { address } => {
-            if !address.starts_with("aiir") {
-                eprintln!(
-                    "Error: '{}' doesn't look like a BitAiir address (must start with 'aiir').",
-                    address
-                );
+            if !is_valid_address(address) {
+                eprintln!("Error: '{}' is not a valid BitAiir address.", address);
+                std::process::exit(1);
+            }
+        }
+        Commands::Gettransactionhistory { address } => {
+            if !is_valid_address(address) {
+                eprintln!("Error: '{}' is not a valid BitAiir address.", address);
                 std::process::exit(1);
             }
         }
         Commands::Sendtoaddress { address, amount } => {
-            if !address.starts_with("aiir") {
-                eprintln!("Error: '{}' doesn't look like a BitAiir address.", address);
+            if !is_valid_address(address) {
+                eprintln!("Error: '{}' is not a valid BitAiir address.", address);
                 std::process::exit(1);
             }
             if *amount <= 0.0 {
@@ -144,6 +163,11 @@ async fn main() {
         Commands::Sendtoaddress { address, amount } => {
             client
                 .request("sendtoaddress", rpc_params![address.clone(), *amount])
+                .await
+        }
+        Commands::Gettransactionhistory { address } => {
+            client
+                .request("gettransactionhistory", rpc_params![address.clone()])
                 .await
         }
         Commands::Getmempoolinfo => client.request("getmempoolinfo", rpc_params![]).await,

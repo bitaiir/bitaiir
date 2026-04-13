@@ -209,6 +209,7 @@ dependencies = [
 name = "bitaiir-cli"
 version = "0.1.0"
 dependencies = [
+ "bitaiir-crypto",
  "clap",
  "jsonrpsee",
  "serde_json",

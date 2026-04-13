@@ -13,6 +13,7 @@ name = "bitaiir-cli"
 path = "src/main.rs"
 
 [dependencies]
+bitaiir-crypto = { workspace = true }
 clap = { workspace = true }
 jsonrpsee = { workspace = true }
 serde_json = { workspace = true }

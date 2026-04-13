@@ -65,6 +65,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("sendtoaddress", "Send AIIR to address"),
     ("getmempoolinfo", "Show mempool status"),
     ("gettransaction", "Look up tx by txid"),
+    ("gettransactionhistory", "Tx history for address"),
     ("mine-start", "Start mining"),
     ("mine-stop", "Stop mining"),
     ("addpeer", "Connect to a peer"),
@@ -452,6 +453,18 @@ fn apply_selection(content: &str, col_start: usize, col_end: usize) -> String {
         out.push_str(INV_OFF);
     }
     out
+}
+
+/// Full validation of a BitAiir address: prefix + base58check + length.
+/// Catches typos (checksum mismatch) and garbled input, not just missing prefix.
+fn is_valid_address(addr: &str) -> bool {
+    let Some(body) = addr.strip_prefix("aiir") else {
+        return false;
+    };
+    let Ok(decoded) = bitaiir_crypto::base58::decode_check(body) else {
+        return false;
+    };
+    decoded.len() == 21
 }
 
 /// Wrap `content` in side borders `│ … │` padded to `cols` visible columns.
@@ -1399,18 +1412,24 @@ fn handle_command(
         "getbalance" if parts.len() < 2 => {
             Some(format!("  {DIM}Usage: /getbalance <address>{RESET}"))
         }
-        "getbalance" if !parts[1].starts_with("aiir") => {
-            Some(format!("  {RED}Error: not a BitAiir address.{RESET}"))
-        }
+        "getbalance" if !is_valid_address(parts[1]) => Some(format!(
+            "  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"
+        )),
         "gettransaction" if parts.len() < 2 => {
             Some(format!("  {DIM}Usage: /gettransaction <txid>{RESET}"))
         }
+        "gettransactionhistory" if parts.len() < 2 => Some(format!(
+            "  {DIM}Usage: /gettransactionhistory <address>{RESET}"
+        )),
+        "gettransactionhistory" if !is_valid_address(parts[1]) => Some(format!(
+            "  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"
+        )),
         "sendtoaddress" if parts.len() < 3 => Some(format!(
             "  {DIM}Usage: /sendtoaddress <addr> <amount>{RESET}"
         )),
-        "sendtoaddress" if !parts[1].starts_with("aiir") => {
-            Some(format!("  {RED}Error: not a BitAiir address.{RESET}"))
-        }
+        "sendtoaddress" if !is_valid_address(parts[1]) => Some(format!(
+            "  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"
+        )),
         "sendtoaddress" if parts[2].parse::<f64>().unwrap_or(0.0) <= 0.0 => {
             Some(format!("  {RED}Error: amount must be > 0.{RESET}"))
         }
@@ -1482,6 +1501,11 @@ fn handle_command(
             "gettransaction" => {
                 client
                     .request("gettransaction", rpc_params![parts[1].clone()])
+                    .await
+            }
+            "gettransactionhistory" => {
+                client
+                    .request("gettransactionhistory", rpc_params![parts[1].clone()])
                     .await
             }
             "mine-start" => client.request("setmining", rpc_params![true]).await,
