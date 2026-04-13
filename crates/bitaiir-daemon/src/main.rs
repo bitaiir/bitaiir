@@ -489,7 +489,7 @@ async fn main() {
         args.mining_threads
     } else {
         std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(1).min(4))
+            .map(|n| (n.get() / 2).clamp(1, 4))
             .unwrap_or(1)
     };
 
