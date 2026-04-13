@@ -278,6 +278,7 @@ dependencies = [
  "bitaiir-net",
  "bitaiir-storage",
  "bitaiir-types",
+ "hex",
  "jsonrpsee",
  "rand",
  "serde",

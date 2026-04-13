@@ -88,6 +88,21 @@ enum Commands {
     Listpeers,
     /// List all known peer addresses (connected or not).
     Listknownpeers,
+    /// Export all wallet keys to a JSON file.
+    Exportwallet {
+        /// Output file path.
+        filename: String,
+    },
+    /// Import wallet keys from a JSON backup file.
+    Importwallet {
+        /// Backup file path.
+        filename: String,
+    },
+    /// Import a single private key in WIF format.
+    Importprivkey {
+        /// WIF-encoded private key.
+        wif: String,
+    },
     /// Encrypt the wallet with a passphrase.
     Encryptwallet {
         /// The passphrase to encrypt with.
@@ -182,6 +197,21 @@ async fn main() {
         Commands::Addpeer { addr } => client.request("addpeer", rpc_params![addr.clone()]).await,
         Commands::Listpeers => client.request("listpeers", rpc_params![]).await,
         Commands::Listknownpeers => client.request("listknownpeers", rpc_params![]).await,
+        Commands::Exportwallet { filename } => {
+            client
+                .request("exportwallet", rpc_params![filename.clone()])
+                .await
+        }
+        Commands::Importwallet { filename } => {
+            client
+                .request("importwallet", rpc_params![filename.clone()])
+                .await
+        }
+        Commands::Importprivkey { wif } => {
+            client
+                .request("importprivkey", rpc_params![wif.clone()])
+                .await
+        }
         Commands::Encryptwallet { passphrase } => {
             client
                 .request("encryptwallet", rpc_params![passphrase.clone()])

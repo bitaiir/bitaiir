@@ -410,6 +410,19 @@ pub trait BitaiirApi {
     #[method(name = "listknownpeers")]
     async fn list_known_peers(&self) -> RpcResult<serde_json::Value>;
 
+    /// Export all wallet keys to a JSON file (WIF format).
+    /// Requires the wallet to be unlocked if encrypted.
+    #[method(name = "exportwallet")]
+    async fn export_wallet(&self, filename: String) -> RpcResult<String>;
+
+    /// Import wallet keys from a JSON backup file.
+    #[method(name = "importwallet")]
+    async fn import_wallet(&self, filename: String) -> RpcResult<String>;
+
+    /// Import a single private key in WIF format.
+    #[method(name = "importprivkey")]
+    async fn import_privkey(&self, wif: String) -> RpcResult<serde_json::Value>;
+
     /// Encrypt the wallet with a passphrase.  All private keys are
     /// re-encrypted on disk.  The wallet stays unlocked after this
     /// call.  Subsequent restarts will require the passphrase.
@@ -1426,6 +1439,131 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         Ok(serde_json::json!({
             "count": peers.len(),
             "peers": peers,
+        }))
+    }
+
+    async fn export_wallet(&self, filename: String) -> RpcResult<String> {
+        let state = self.state.read().await;
+        if state.wallet_encrypted && !state.wallet_unlocked {
+            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                -13,
+                "wallet is locked, unlock before exporting",
+                None::<()>,
+            ));
+        }
+
+        let addresses = state.wallet.addresses();
+        let mut keys = Vec::new();
+        for addr in &addresses {
+            if let Some((privkey, pubkey)) = state.wallet.get_keys(addr) {
+                let wif = bitaiir_crypto::wif::encode(privkey, true);
+                keys.push(serde_json::json!({
+                    "address": addr,
+                    "private_key_wif": wif,
+                    "private_key_hex": hex::encode(privkey.to_bytes()),
+                    "public_key_hex": hex::encode(pubkey.to_compressed()),
+                }));
+            }
+        }
+
+        let backup = serde_json::json!({
+            "version": 1,
+            "network": "mainnet",
+            "created_at": unix_now(),
+            "keys": keys,
+        });
+
+        let json = serde_json::to_string_pretty(&backup).unwrap();
+        std::fs::write(&filename, &json).map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -11,
+                format!("failed to write file: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        self.emit(format!("  Wallet exported to {filename}"));
+        Ok(format!("exported {} key(s) to {filename}", keys.len()))
+    }
+
+    async fn import_wallet(&self, filename: String) -> RpcResult<String> {
+        let content = std::fs::read_to_string(&filename).map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -11,
+                format!("failed to read file: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let backup: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(-11, format!("invalid JSON: {e}"), None::<()>)
+        })?;
+
+        let keys = backup["keys"].as_array().ok_or_else(|| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -11,
+                "missing 'keys' array in backup file",
+                None::<()>,
+            )
+        })?;
+
+        let mut imported = 0u32;
+        let mut state = self.state.write().await;
+        for entry in keys {
+            let Some(wif) = entry["private_key_wif"].as_str() else {
+                continue;
+            };
+            let Ok((privkey, _compressed)) = bitaiir_crypto::wif::decode(wif) else {
+                continue;
+            };
+            let pubkey = privkey.public_key();
+            let address = bitaiir_crypto::address::Address::from_compressed_public_key(&pubkey);
+            let addr_str = address.as_str().to_string();
+
+            // Save to storage.
+            let _ = self.storage.save_wallet_key(&addr_str, &privkey, &pubkey);
+
+            // Add to in-memory wallet.
+            state.wallet.import_key(addr_str, privkey, pubkey);
+            imported += 1;
+        }
+
+        self.emit(format!("  Imported {imported} key(s) from {filename}"));
+        Ok(format!("imported {imported} key(s) from {filename}"))
+    }
+
+    async fn import_privkey(&self, wif: String) -> RpcResult<serde_json::Value> {
+        let (privkey, _compressed) = bitaiir_crypto::wif::decode(&wif).map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -11,
+                format!("invalid WIF key: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let pubkey = privkey.public_key();
+        let address = bitaiir_crypto::address::Address::from_compressed_public_key(&pubkey);
+        let addr_str = address.as_str().to_string();
+
+        // Save to storage.
+        self.storage
+            .save_wallet_key(&addr_str, &privkey, &pubkey)
+            .map_err(|e| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    -11,
+                    format!("storage error: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        // Add to in-memory wallet.
+        let mut state = self.state.write().await;
+        state.wallet.import_key(addr_str.clone(), privkey, pubkey);
+
+        self.emit(format!("  Imported key: {addr_str}"));
+        Ok(serde_json::json!({
+            "address": addr_str,
+            "status": "imported",
         }))
     }
 

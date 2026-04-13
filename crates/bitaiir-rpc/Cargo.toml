@@ -12,6 +12,7 @@ repository.workspace = true
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 bitaiir-chain = { workspace = true }
+hex = { workspace = true }
 bitaiir-crypto = { workspace = true }
 bitaiir-net = { workspace = true }
 bitaiir-storage = { workspace = true }

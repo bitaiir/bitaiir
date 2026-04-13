@@ -71,6 +71,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("addpeer", "Connect to a peer"),
     ("listpeers", "Show connected peers"),
     ("listknownpeers", "Show all known peers"),
+    ("exportwallet", "Export keys to JSON file"),
+    ("importwallet", "Import keys from backup"),
+    ("importprivkey", "Import single WIF key"),
     ("encryptwallet", "Encrypt wallet with passphrase"),
     ("walletpassphrase", "Unlock wallet for N seconds"),
     ("walletlock", "Lock wallet immediately"),
@@ -1439,6 +1442,15 @@ fn handle_command(
         "sendtoaddress" if parts[2].parse::<f64>().unwrap_or(0.0) <= 0.0 => {
             Some(format!("  {RED}Error: amount must be > 0.{RESET}"))
         }
+        "exportwallet" if parts.len() < 2 => {
+            Some(format!("  {DIM}Usage: /exportwallet <filename>{RESET}"))
+        }
+        "importwallet" if parts.len() < 2 => {
+            Some(format!("  {DIM}Usage: /importwallet <filename>{RESET}"))
+        }
+        "importprivkey" if parts.len() < 2 => {
+            Some(format!("  {DIM}Usage: /importprivkey <wif>{RESET}"))
+        }
         "encryptwallet" if parts.len() < 2 => {
             Some(format!("  {DIM}Usage: /encryptwallet <passphrase>{RESET}"))
         }
@@ -1523,6 +1535,21 @@ fn handle_command(
             }
             "listpeers" => client.request("listpeers", rpc_params![]).await,
             "listknownpeers" => client.request("listknownpeers", rpc_params![]).await,
+            "exportwallet" => {
+                client
+                    .request("exportwallet", rpc_params![parts[1].clone()])
+                    .await
+            }
+            "importwallet" => {
+                client
+                    .request("importwallet", rpc_params![parts[1].clone()])
+                    .await
+            }
+            "importprivkey" => {
+                client
+                    .request("importprivkey", rpc_params![parts[1].clone()])
+                    .await
+            }
             "encryptwallet" => {
                 client
                     .request("encryptwallet", rpc_params![parts[1].clone()])
