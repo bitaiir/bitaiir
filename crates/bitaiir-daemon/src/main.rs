@@ -31,38 +31,93 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+mod config;
 mod peer_manager;
 mod tui;
 
 #[derive(Parser)]
 #[command(name = "bitaiird", about = "BitAiir Core daemon", version)]
 struct Args {
+    /// Path to the TOML config file.
+    #[arg(long, default_value = "bitaiir.toml")]
+    config: String,
     /// RPC server bind address.
-    #[arg(long, default_value = "127.0.0.1:8443")]
-    rpc_addr: String,
+    #[arg(long)]
+    rpc_addr: Option<String>,
     /// P2P listener bind address.
-    #[arg(long, default_value = "127.0.0.1:8444")]
-    p2p_addr: String,
+    #[arg(long)]
+    p2p_addr: Option<String>,
     /// Data directory for chain storage.
-    #[arg(long, default_value = "bitaiir_data")]
-    data_dir: String,
-    /// Enable mining on startup. Without this flag the node only
-    /// syncs, serves RPC, and relays transactions — like bitcoind.
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
+    data_dir: Option<String>,
+    /// Enable mining on startup.
+    #[arg(long)]
     mine: bool,
-    /// Interactive mode: show a command prompt where you can type
-    /// commands directly, including `mine start` / `mine stop`.
-    #[arg(short, long, default_value_t = false)]
+    /// Interactive mode.
+    #[arg(short, long)]
     interactive: bool,
-    /// Connect to a peer on startup. Repeatable:
-    /// `--connect 1.2.3.4:8444 --connect 5.6.7.8:8444`
+    /// Connect to a peer on startup (repeatable).
     #[arg(long = "connect", value_name = "HOST:PORT")]
     connect: Vec<String>,
-    /// Number of parallel mining threads (default: half the CPU cores).
-    /// Each thread allocates ~64 MiB for Argon2id, so 4 threads use
-    /// ~256 MiB of RAM during mining.
-    #[arg(long, default_value_t = 0)]
+    /// Number of parallel mining threads. [default: min(4, cores/2)]
+    #[arg(long)]
+    mining_threads: Option<usize>,
+}
+
+/// Resolved settings after merging CLI > config > defaults.
+struct Settings {
+    rpc_addr: String,
+    p2p_addr: String,
+    data_dir: String,
+    mine: bool,
+    interactive: bool,
+    connect: Vec<String>,
     mining_threads: usize,
+}
+
+impl Settings {
+    fn from_args_and_config(args: &Args, cfg: &config::Config) -> Self {
+        let rpc_addr = args
+            .rpc_addr
+            .clone()
+            .or_else(|| cfg.network.rpc_addr.clone())
+            .unwrap_or_else(|| config::DEFAULT_RPC_ADDR.to_string());
+
+        let p2p_addr = args
+            .p2p_addr
+            .clone()
+            .or_else(|| cfg.network.p2p_addr.clone())
+            .unwrap_or_else(|| config::DEFAULT_P2P_ADDR.to_string());
+
+        let data_dir = args
+            .data_dir
+            .clone()
+            .or_else(|| cfg.storage.data_dir.clone())
+            .unwrap_or_else(|| config::DEFAULT_DATA_DIR.to_string());
+
+        let mine = args.mine || cfg.mining.enabled.unwrap_or(false);
+
+        let interactive = args.interactive;
+
+        let mut connect = args.connect.clone();
+        if connect.is_empty() {
+            if let Some(cfg_connect) = &cfg.network.connect {
+                connect = cfg_connect.clone();
+            }
+        }
+
+        let mining_threads = args.mining_threads.or(cfg.mining.threads).unwrap_or(0);
+
+        Self {
+            rpc_addr,
+            p2p_addr,
+            data_dir,
+            mine,
+            interactive,
+            connect,
+            mining_threads,
+        }
+    }
 }
 
 fn unix_now() -> u64 {
@@ -82,6 +137,12 @@ fn short_hash(hex: &str) -> String {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    // Load config file and merge with CLI flags.
+    let config_path = std::path::Path::new(&args.config);
+    config::write_default_config(config_path);
+    let cfg = config::load_config(config_path);
+    let args = Settings::from_args_and_config(&args, &cfg);
 
     // In TUI mode, skip the tracing subscriber: raw mode means stdout
     // output would corrupt the terminal. System events go through the

@@ -125,10 +125,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Pure-Rust embedded ACID key-value store for chain persistence.
 redb = "2"
 
-# --- Future external crates (uncomment when wiring them in) ---
-#
-# Config files
-# toml = "0.8"
+# Config file parsing.
+toml = "0.8"
 
 # Release profile: optimize hard, strip symbols, abort on panic for smaller
 # binaries. We override this for benchmarks if/when we add them.

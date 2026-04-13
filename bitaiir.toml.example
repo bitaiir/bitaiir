@@ -1,0 +1,30 @@
+# BitAiir Core configuration file.
+#
+# Copy this file to `bitaiir.toml` (or pass --config <path>) and
+# uncomment the settings you want to customize.  CLI flags always
+# take priority over values set here.
+#
+# The daemon auto-creates a default `bitaiir.toml` on first run if
+# none exists.
+
+[network]
+# JSON-RPC server bind address.
+# rpc_addr = "127.0.0.1:8443"
+
+# P2P listener bind address.
+# p2p_addr = "127.0.0.1:8444"
+
+# Peers to connect to on startup.  Same as --connect on the CLI.
+# connect = ["127.0.0.1:8544", "1.2.3.4:8444"]
+
+[mining]
+# Start mining automatically on daemon startup (same as --mine).
+# enabled = false
+
+# Number of parallel mining threads.  0 = auto (min(4, cores/2)).
+# Each thread uses ~64 MiB of RAM for Argon2id.
+# threads = 0
+
+[storage]
+# Directory for chain database, wallet keys, and peer data.
+# data_dir = "bitaiir_data"

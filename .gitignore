@@ -144,3 +144,8 @@ dmypy.json
 
 # BitAiir data directory (blockchain database, wallet keys)
 bitaiir_data/
+data_a/
+data_b/
+
+# Local config file (bitaiir.toml.example is tracked instead)
+bitaiir.toml
