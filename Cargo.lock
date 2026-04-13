@@ -268,10 +268,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitaiir-node"
-version = "0.1.0"
-
-[[package]]
 name = "bitaiir-rpc"
 version = "0.1.0"
 dependencies = [

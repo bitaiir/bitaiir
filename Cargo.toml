@@ -9,8 +9,6 @@
 #
 #     bitaiir-daemon      bitaiir-cli         <- binaries
 #           |
-#       bitaiir-node                          <- daemon library
-#           |
 #     +-----+-----+-----+-----+
 #     |     |     |     |     |
 #   chain  net   rpc  storage                 <- subsystems
@@ -32,7 +30,6 @@ members = [
     "crates/bitaiir-chain",
     "crates/bitaiir-net",
     "crates/bitaiir-rpc",
-    "crates/bitaiir-node",
     "crates/bitaiir-daemon",
     "crates/bitaiir-cli",
 ]
@@ -59,7 +56,6 @@ bitaiir-storage = { path = "crates/bitaiir-storage", version = "0.1.0" }
 bitaiir-chain = { path = "crates/bitaiir-chain", version = "0.1.0" }
 bitaiir-net = { path = "crates/bitaiir-net", version = "0.1.0" }
 bitaiir-rpc = { path = "crates/bitaiir-rpc", version = "0.1.0" }
-bitaiir-node = { path = "crates/bitaiir-node", version = "0.1.0" }
 
 # --- External crates ---
 # Crypto primitives. `secp256k1` is the official binding to libsecp256k1, the
