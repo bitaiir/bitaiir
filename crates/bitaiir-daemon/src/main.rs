@@ -22,7 +22,6 @@ use std::time::Instant;
 use bitaiir_chain::{Chain, Mempool, UtxoSet, mine_genesis, subsidy, validate_block};
 use bitaiir_crypto::hash::hash160;
 use bitaiir_net::Peer;
-use bitaiir_net::message::NetMessage;
 use bitaiir_rpc::{BitaiirApiServer, BitaiirRpcImpl, NodeState, SharedState, Wallet};
 use bitaiir_storage::Storage;
 use bitaiir_types::OutPoint;
@@ -32,6 +31,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+mod peer_manager;
 mod tui;
 
 #[derive(Parser)]
@@ -54,6 +54,10 @@ struct Args {
     /// commands directly, including `mine start` / `mine stop`.
     #[arg(short, long, default_value_t = false)]
     interactive: bool,
+    /// Connect to a peer on startup. Repeatable:
+    /// `--connect 1.2.3.4:8444 --connect 5.6.7.8:8444`
+    #[arg(long = "connect", value_name = "HOST:PORT")]
+    connect: Vec<String>,
 }
 
 fn unix_now() -> u64 {
@@ -217,12 +221,54 @@ async fn main() {
 
     // --- Initialize shared state ----------------------------------------- //
 
+    // Load known peers from storage and merge with --connect and seeds.
+    let mut known_peers = std::collections::HashMap::new();
+    if let Ok(stored) = storage.load_known_peers() {
+        for (addr, last_seen, failures, banned_until, source) in stored {
+            known_peers.insert(
+                addr.clone(),
+                bitaiir_rpc::KnownPeer {
+                    addr,
+                    last_seen,
+                    consecutive_failures: failures,
+                    banned_until,
+                    source: bitaiir_rpc::KnownPeer::source_from_byte(source),
+                },
+            );
+        }
+    }
+    // --connect peers.
+    for addr in &args.connect {
+        known_peers
+            .entry(addr.clone())
+            .or_insert_with(|| bitaiir_rpc::KnownPeer {
+                addr: addr.clone(),
+                last_seen: 0,
+                consecutive_failures: 0,
+                banned_until: 0,
+                source: bitaiir_rpc::PeerSource::Manual,
+            });
+    }
+    // Seed nodes (fallback).
+    for &addr in peer_manager::SEED_NODES {
+        known_peers
+            .entry(addr.to_string())
+            .or_insert_with(|| bitaiir_rpc::KnownPeer {
+                addr: addr.to_string(),
+                last_seen: 0,
+                consecutive_failures: 0,
+                banned_until: 0,
+                source: bitaiir_rpc::PeerSource::Seed,
+            });
+    }
+
     let state: SharedState = Arc::new(RwLock::new(NodeState {
         chain,
         utxo,
         mempool: Mempool::new(),
         wallet,
         peers: Vec::new(),
+        known_peers,
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -231,8 +277,6 @@ async fn main() {
     let mining_active = Arc::new(AtomicBool::new(args.mine));
 
     // Channel for routing mining + P2P + system events to the TUI.
-    // Created here so both the RPC layer and the P2P listener can
-    // share clones of the sender.
     let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
     let events_sender = if args.interactive {
         Some(log_tx.clone())
@@ -259,6 +303,10 @@ async fn main() {
     info!("RPC server listening on http://{}", args.rpc_addr);
 
     // --- Start P2P listener ---------------------------------------------- //
+    //
+    // Inbound connections: accept → handshake → register → delegate to
+    // the shared `run_gossip_loop` (which also handles `GetAddr`/`Addr`
+    // peer discovery messages).
 
     let p2p_state = state.clone();
     let p2p_addr = args.p2p_addr.clone();
@@ -281,8 +329,6 @@ async fn main() {
                     let storage = p2p_storage.clone();
                     let events = p2p_events.clone();
                     tokio::spawn(async move {
-                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
                         let our_height = {
                             let s = state.read().await;
                             s.chain.height()
@@ -307,12 +353,8 @@ async fn main() {
                             }
                         };
 
-                        // Register the inbound peer.  We keep the
-                        // RECEIVER half of the broadcast channel below
-                        // so newly-mined blocks and user transactions
-                        // actually reach this connection.
                         let addr_key = addr.to_string();
-                        let (tx_send, mut tx_recv) =
+                        let (tx_send, tx_recv) =
                             tokio::sync::mpsc::channel::<bitaiir_net::NetMessage>(100);
                         {
                             let mut s = state.write().await;
@@ -332,187 +374,13 @@ async fn main() {
                             ));
                         }
 
-                        // Split peer into reader/writer so we can
-                        // multiplex incoming frames with outgoing
-                        // broadcasts via `tokio::select!`.
-                        let (mut reader, mut writer, _peer_addr) = peer.into_parts();
-
-                        loop {
-                            tokio::select! {
-                                // Outgoing: relay mined blocks / mempool txs to this peer.
-                                msg = tx_recv.recv() => {
-                                    let Some(m) = msg else { break };
-                                    let payload = m.to_payload();
-                                    let frame = bitaiir_net::protocol::frame_message(
-                                        m.command(),
-                                        &payload,
-                                    );
-                                    if writer.write_all(&frame).await.is_err() {
-                                        break;
-                                    }
-                                    if writer.flush().await.is_err() {
-                                        break;
-                                    }
-                                }
-
-                                // Incoming: read one framed message.
-                                result = async {
-                                    let mut header_buf =
-                                        [0u8; bitaiir_net::protocol::HEADER_SIZE];
-                                    reader.read_exact(&mut header_buf).await?;
-                                    let header =
-                                        bitaiir_net::protocol::parse_header(&header_buf)
-                                            .ok_or_else(|| std::io::Error::new(
-                                                std::io::ErrorKind::InvalidData,
-                                                "bad magic",
-                                            ))?;
-                                    let mut payload = vec![0u8; header.payload_len as usize];
-                                    if !payload.is_empty() {
-                                        reader.read_exact(&mut payload).await?;
-                                    }
-                                    Ok::<_, std::io::Error>(
-                                        bitaiir_net::NetMessage::from_payload(
-                                            &header.command,
-                                            &payload,
-                                        ),
-                                    )
-                                } => {
-                                    match result {
-                                        Ok(Some(NetMessage::GetBlocks(start_height))) => {
-                                            info!("peer {addr} requests blocks from height {start_height}");
-                                            // Snapshot blocks under the lock,
-                                            // then write them out without holding it.
-                                            let to_send: Vec<Vec<u8>> = {
-                                                let s = state.read().await;
-                                                let tip = s.chain.height();
-                                                (start_height + 1..=tip)
-                                                    .filter_map(|h| {
-                                                        s.chain.block_at(h).map(|b| {
-                                                            bitaiir_types::encoding::to_bytes(b)
-                                                                .expect("block encodes")
-                                                        })
-                                                    })
-                                                    .collect()
-                                            };
-                                            let count = to_send.len();
-                                            let mut ok = true;
-                                            for bytes in to_send {
-                                                let m = NetMessage::BlockData(bytes);
-                                                let payload = m.to_payload();
-                                                let frame = bitaiir_net::protocol::frame_message(
-                                                    m.command(),
-                                                    &payload,
-                                                );
-                                                if writer.write_all(&frame).await.is_err() {
-                                                    ok = false;
-                                                    break;
-                                                }
-                                                if writer.flush().await.is_err() {
-                                                    ok = false;
-                                                    break;
-                                                }
-                                            }
-                                            if ok {
-                                                let done = NetMessage::SyncDone;
-                                                let payload = done.to_payload();
-                                                let frame = bitaiir_net::protocol::frame_message(
-                                                    done.command(),
-                                                    &payload,
-                                                );
-                                                let _ = writer.write_all(&frame).await;
-                                                let _ = writer.flush().await;
-                                            }
-                                            info!("sent {count} blocks to peer {addr} (from {start_height}+)");
-                                        }
-                                        Ok(Some(NetMessage::BlockData(bytes))) => {
-                                            if let Ok(block) = bitaiir_types::encoding::from_bytes::<
-                                                bitaiir_types::Block,
-                                            >(&bytes) {
-                                                let mut s = state.write().await;
-                                                let height = s.chain.height() + 1;
-                                                let now = std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .unwrap()
-                                                    .as_secs();
-                                                if bitaiir_chain::validate_block(
-                                                    &block,
-                                                    &s.chain,
-                                                    &s.utxo,
-                                                    now + 7200,
-                                                )
-                                                .is_ok()
-                                                {
-                                                    let spent: Vec<OutPoint> = block
-                                                        .transactions
-                                                        .iter()
-                                                        .skip(1)
-                                                        .flat_map(|tx| {
-                                                            tx.inputs.iter().map(|i| i.prev_out)
-                                                        })
-                                                        .collect();
-                                                    if s.chain.push(block.clone()).is_ok() {
-                                                        for tx in &block.transactions {
-                                                            let _ = s.utxo.apply_transaction(tx, height);
-                                                        }
-                                                        let _ = storage.apply_block(
-                                                            height, &block, &spent,
-                                                        );
-                                                        // Remove confirmed txs from mempool.
-                                                        for tx in block.transactions.iter().skip(1) {
-                                                            s.mempool.remove(&tx.txid());
-                                                        }
-                                                        for p in &mut s.peers {
-                                                            if p.addr == addr_key {
-                                                                p.best_height =
-                                                                    p.best_height.max(height);
-                                                                break;
-                                                            }
-                                                        }
-                                                        info!("received block {height} from inbound peer {addr}");
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Ok(Some(NetMessage::TxData(bytes))) => {
-                                            if let Ok(tx) = bitaiir_types::encoding::from_bytes::<
-                                                bitaiir_types::Transaction,
-                                            >(&bytes) {
-                                                let txid = tx.txid();
-                                                let mut s = state.write().await;
-                                                if !s.mempool.contains(&txid) {
-                                                    s.mempool.add(tx);
-                                                    info!("received tx {txid} from inbound peer {addr}");
-                                                }
-                                            }
-                                        }
-                                        Ok(Some(NetMessage::Ping(nonce))) => {
-                                            let pong = NetMessage::Pong(nonce);
-                                            let payload = pong.to_payload();
-                                            let frame = bitaiir_net::protocol::frame_message(
-                                                pong.command(),
-                                                &payload,
-                                            );
-                                            let _ = writer.write_all(&frame).await;
-                                            let _ = writer.flush().await;
-                                        }
-                                        Ok(_) => { /* ignore other messages */ }
-                                        Err(_) => {
-                                            info!("peer {addr} disconnected");
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Peer gone — unregister and emit.
-                        {
-                            let mut s = state.write().await;
-                            s.peers.retain(|p| p.addr != addr_key);
-                        }
-                        if let Some(ev) = &events {
-                            let _ = ev.send(format!("  peer disconnected: {addr_key}"));
-                        }
+                        // Delegate to the shared gossip loop which
+                        // handles blocks, txs, pings, AND addr gossip.
+                        let (reader, writer, _) = peer.into_parts();
+                        peer_manager::run_gossip_loop(
+                            reader, writer, tx_recv, state, storage, events, addr_key,
+                        )
+                        .await;
                     });
                 }
                 Err(e) => {
@@ -521,6 +389,21 @@ async fn main() {
             }
         }
     });
+
+    // --- Start PeerManager ----------------------------------------------- //
+    //
+    // The PeerManager periodically checks the outbound connection count
+    // and tries to connect to known peers that are below the target.
+    // It also handles `--connect` peers and auto-reconnects.
+
+    let pm = peer_manager::PeerManager::new(
+        state.clone(),
+        storage.clone(),
+        events_sender.clone(),
+        shutdown.clone(),
+        args.p2p_addr.clone(),
+    );
+    let _pm_handle = pm.spawn();
 
     // --- Mining in background thread ------------------------------------- //
 

@@ -35,6 +35,7 @@ const BLOCKS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blocks");
 const HEIGHT_TO_HASH: TableDefinition<u64, &[u8]> = TableDefinition::new("height_to_hash");
 const UTXOS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("utxos");
 const WALLET_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wallet_keys");
+const KNOWN_PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("known_peers");
 const METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
 
 // --- Errors -------------------------------------------------------------- //
@@ -283,5 +284,74 @@ impl Storage {
             }
         }
         Ok(map)
+    }
+
+    // --- Known peers storage --------------------------------------------- //
+
+    /// Persist a known peer record.
+    ///
+    /// Record layout (21 bytes):
+    /// `last_seen(8) + failures(4) + banned_until(8) + source(1)`
+    pub fn save_known_peer(
+        &self,
+        addr: &str,
+        last_seen: u64,
+        failures: u32,
+        banned_until: u64,
+        source: u8,
+    ) -> Result<()> {
+        let mut value = Vec::with_capacity(21);
+        value.extend_from_slice(&last_seen.to_le_bytes());
+        value.extend_from_slice(&failures.to_le_bytes());
+        value.extend_from_slice(&banned_until.to_le_bytes());
+        value.push(source);
+
+        let write = self.db.begin_write()?;
+        {
+            let mut table = write.open_table(KNOWN_PEERS)?;
+            table.insert(addr, value.as_slice())?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Load all known peer records.
+    ///
+    /// Returns `(addr, last_seen, failures, banned_until, source)` tuples.
+    #[allow(clippy::type_complexity)]
+    pub fn load_known_peers(&self) -> Result<Vec<(String, u64, u32, u64, u8)>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(KNOWN_PEERS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut peers = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            let addr = key.value().to_string();
+            let bytes = value.value();
+            if bytes.len() < 21 {
+                continue;
+            }
+            let last_seen = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+            let failures = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+            let banned_until = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
+            let source = bytes[20];
+            peers.push((addr, last_seen, failures, banned_until, source));
+        }
+        Ok(peers)
+    }
+
+    /// Remove a peer from the known peers table.
+    pub fn remove_known_peer(&self, addr: &str) -> Result<()> {
+        let write = self.db.begin_write()?;
+        {
+            let mut table = write.open_table(KNOWN_PEERS)?;
+            table.remove(addr)?;
+        }
+        write.commit()?;
+        Ok(())
     }
 }

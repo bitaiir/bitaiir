@@ -70,6 +70,8 @@ enum Commands {
     },
     /// List currently connected peers.
     Listpeers,
+    /// List all known peer addresses (connected or not).
+    Listknownpeers,
     /// Ask the daemon to shut down gracefully.
     Stop,
 }
@@ -140,6 +142,7 @@ async fn main() {
         Commands::MineStop => client.request("setmining", rpc_params![false]).await,
         Commands::Addpeer { addr } => client.request("addpeer", rpc_params![addr.clone()]).await,
         Commands::Listpeers => client.request("listpeers", rpc_params![]).await,
+        Commands::Listknownpeers => client.request("listknownpeers", rpc_params![]).await,
         Commands::Stop => client.request("stop", rpc_params![]).await,
     };
 

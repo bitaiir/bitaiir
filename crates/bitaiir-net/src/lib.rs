@@ -20,6 +20,6 @@ pub mod peer;
 pub mod protocol;
 
 pub use error::{Error, Result};
-pub use message::{NetMessage, VersionMessage};
+pub use message::{NetMessage, PeerAddr, VersionMessage};
 pub use peer::Peer;
 pub use protocol::MAGIC;

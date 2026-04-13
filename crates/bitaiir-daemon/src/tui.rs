@@ -69,6 +69,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("mine-stop", "Stop mining"),
     ("addpeer", "Connect to a peer"),
     ("listpeers", "Show connected peers"),
+    ("listknownpeers", "Show all known peers"),
     ("stop", "Stop the daemon"),
     ("help", "Show all commands"),
     ("exit", "Exit BitAiir"),
@@ -1482,6 +1483,7 @@ fn handle_command(
                     .await
             }
             "listpeers" => client.request("listpeers", rpc_params![]).await,
+            "listknownpeers" => client.request("listknownpeers", rpc_params![]).await,
             "stop" => client.request("stop", rpc_params![]).await,
             other => Ok(serde_json::json!(format!(
                 "Unknown: '/{other}'. Type /help."

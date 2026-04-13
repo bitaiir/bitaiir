@@ -23,7 +23,26 @@ pub enum NetMessage {
     SyncDone,
     /// A serialized transaction for mempool gossip.
     TxData(Vec<u8>),
+    /// Request a list of known peer addresses.
+    GetAddr,
+    /// A batch of known peer addresses (response to GetAddr, or
+    /// periodic relay).  Capped at 1000 entries per message.
+    Addr(Vec<PeerAddr>),
 }
+
+/// An address entry exchanged via the `addr` / `getaddr` protocol.
+#[derive(Debug, Clone)]
+pub struct PeerAddr {
+    /// Network address as `"ip:port"`.
+    pub addr: String,
+    /// Bitmask of services the peer offers (1 = full node).
+    pub services: u64,
+    /// Unix timestamp when this peer was last known to be active.
+    pub timestamp: u64,
+}
+
+/// Maximum number of peer addresses in a single `Addr` message.
+const MAX_ADDR_ENTRIES: usize = 1000;
 
 /// Payload of the `version` message.
 #[derive(Debug, Clone)]
@@ -52,6 +71,8 @@ impl NetMessage {
             NetMessage::BlockData(_) => "block",
             NetMessage::SyncDone => "syncdone",
             NetMessage::TxData(_) => "tx",
+            NetMessage::GetAddr => "getaddr",
+            NetMessage::Addr(_) => "addr",
         }
     }
 
@@ -77,6 +98,20 @@ impl NetMessage {
             NetMessage::BlockData(bytes) => bytes.clone(),
             NetMessage::SyncDone => Vec::new(),
             NetMessage::TxData(bytes) => bytes.clone(),
+            NetMessage::GetAddr => Vec::new(),
+            NetMessage::Addr(peers) => {
+                let count = peers.len().min(MAX_ADDR_ENTRIES) as u32;
+                let mut buf = Vec::new();
+                buf.extend_from_slice(&count.to_le_bytes());
+                for p in peers.iter().take(MAX_ADDR_ENTRIES) {
+                    let addr_bytes = p.addr.as_bytes();
+                    buf.extend_from_slice(&(addr_bytes.len() as u16).to_le_bytes());
+                    buf.extend_from_slice(addr_bytes);
+                    buf.extend_from_slice(&p.services.to_le_bytes());
+                    buf.extend_from_slice(&p.timestamp.to_le_bytes());
+                }
+                buf
+            }
         }
     }
 
@@ -121,6 +156,43 @@ impl NetMessage {
             "block" => Some(NetMessage::BlockData(payload.to_vec())),
             "syncdone" => Some(NetMessage::SyncDone),
             "tx" => Some(NetMessage::TxData(payload.to_vec())),
+            "getaddr" => Some(NetMessage::GetAddr),
+            "addr" => {
+                if payload.len() < 4 {
+                    return None;
+                }
+                let count = u32::from_le_bytes(payload[0..4].try_into().ok()?) as usize;
+                if count > MAX_ADDR_ENTRIES {
+                    return None;
+                }
+                let mut offset = 4;
+                let mut peers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if offset + 2 > payload.len() {
+                        return None;
+                    }
+                    let addr_len =
+                        u16::from_le_bytes(payload[offset..offset + 2].try_into().ok()?) as usize;
+                    offset += 2;
+                    if offset + addr_len + 16 > payload.len() {
+                        return None;
+                    }
+                    let addr =
+                        String::from_utf8_lossy(&payload[offset..offset + addr_len]).to_string();
+                    offset += addr_len;
+                    let services = u64::from_le_bytes(payload[offset..offset + 8].try_into().ok()?);
+                    offset += 8;
+                    let timestamp =
+                        u64::from_le_bytes(payload[offset..offset + 8].try_into().ok()?);
+                    offset += 8;
+                    peers.push(PeerAddr {
+                        addr,
+                        services,
+                        timestamp,
+                    });
+                }
+                Some(NetMessage::Addr(peers))
+            }
             _ => None,
         }
     }

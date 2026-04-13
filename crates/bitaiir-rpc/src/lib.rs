@@ -34,11 +34,13 @@ pub struct NodeState {
     pub wallet: Wallet,
     /// Currently connected peers (inbound + outbound).
     pub peers: Vec<ConnectedPeer>,
+    /// All peers we've ever heard about (manual, gossip, seeds).
+    /// Keyed by `"ip:port"`.  The `PeerManager` reads this to decide
+    /// which peers to reconnect to.
+    pub known_peers: std::collections::HashMap<String, KnownPeer>,
 }
 
-/// One live P2P connection.  Holds both the broadcast channel
-/// (used to relay new blocks and transactions to the peer) and the
-/// metadata we expose via the `listpeers` RPC.
+/// One live P2P connection.
 pub struct ConnectedPeer {
     pub addr: String,
     pub user_agent: String,
@@ -61,6 +63,99 @@ impl PeerDirection {
             PeerDirection::Outbound => "outbound",
         }
     }
+}
+
+/// A peer address we know about, whether or not we're currently
+/// connected.  Persisted across restarts via `bitaiir-storage`.
+#[derive(Debug, Clone)]
+pub struct KnownPeer {
+    pub addr: String,
+    pub last_seen: u64,
+    pub consecutive_failures: u32,
+    pub banned_until: u64,
+    pub source: PeerSource,
+}
+
+impl KnownPeer {
+    /// Record a connection failure and apply a temporary ban if the
+    /// threshold is reached.
+    pub fn record_failure(&mut self) {
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= 5 {
+            self.banned_until = unix_now() + 30 * 60; // 30 min ban
+        }
+    }
+
+    /// Reset the failure counter on a successful connection.
+    pub fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.banned_until = 0;
+        self.last_seen = unix_now();
+    }
+
+    /// Apply a ban for the given duration in seconds.
+    pub fn ban(&mut self, seconds: u64) {
+        self.banned_until = unix_now() + seconds;
+    }
+
+    /// Whether this peer is currently banned.
+    pub fn is_banned(&self) -> bool {
+        self.banned_until > unix_now()
+    }
+
+    /// Exponential backoff delay before next connection attempt.
+    /// 5s * 2^failures, capped at 5 minutes.
+    pub fn backoff_secs(&self) -> u64 {
+        let base = 5u64;
+        let delay = base.saturating_mul(1u64 << self.consecutive_failures.min(6));
+        delay.min(300) // cap at 5 min
+    }
+
+    /// Numeric source code for storage serialization.
+    pub fn source_byte(&self) -> u8 {
+        match self.source {
+            PeerSource::Manual => 0,
+            PeerSource::Addr => 1,
+            PeerSource::Seed => 2,
+        }
+    }
+
+    /// Reconstruct a `PeerSource` from the byte stored in redb.
+    pub fn source_from_byte(b: u8) -> PeerSource {
+        match b {
+            0 => PeerSource::Manual,
+            1 => PeerSource::Addr,
+            2 => PeerSource::Seed,
+            _ => PeerSource::Addr,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerSource {
+    /// Added via `--connect` flag or `/addpeer` command.
+    Manual,
+    /// Learned via `addr` gossip from another peer.
+    Addr,
+    /// From the hardcoded seed list.
+    Seed,
+}
+
+impl PeerSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PeerSource::Manual => "manual",
+            PeerSource::Addr => "addr",
+            PeerSource::Seed => "seed",
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
 }
 
 /// Thread-safe handle to the node state.
@@ -271,6 +366,10 @@ pub trait BitaiirApi {
     /// List currently connected peers with their metadata.
     #[method(name = "listpeers")]
     async fn list_peers(&self) -> RpcResult<serde_json::Value>;
+
+    /// List all known peer addresses (connected or not).
+    #[method(name = "listknownpeers")]
+    async fn list_known_peers(&self) -> RpcResult<serde_json::Value>;
 
     #[method(name = "stop")]
     async fn stop(&self) -> RpcResult<String>;
@@ -817,7 +916,9 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let (reader, writer, peer_addr) = peer.into_parts();
         let (tx_send, mut tx_recv) = tokio::sync::mpsc::channel::<bitaiir_net::NetMessage>(100);
 
-        // Register this peer's metadata + sender channel in shared state.
+        // Register this peer's metadata + sender channel in shared state,
+        // and add/update the known-peer database so the PeerManager can
+        // reconnect if the connection drops later.
         let peer_addr_key = peer_addr.to_string();
         {
             let mut state = self.state.write().await;
@@ -829,6 +930,18 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                 connected_at: std::time::Instant::now(),
                 sender: tx_send,
             });
+            // Upsert known peer (or update existing entry on success).
+            let kp = state
+                .known_peers
+                .entry(addr.clone())
+                .or_insert_with(|| KnownPeer {
+                    addr: addr.clone(),
+                    last_seen: 0,
+                    consecutive_failures: 0,
+                    banned_until: 0,
+                    source: PeerSource::Manual,
+                });
+            kp.record_success();
         }
         // Event line for the interactive TUI (plain text — the TUI
         // doesn't re-parse colors for free-form event strings).
@@ -1020,6 +1133,35 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                 })
             })
             .collect();
+        Ok(serde_json::json!({
+            "count": peers.len(),
+            "peers": peers,
+        }))
+    }
+
+    async fn list_known_peers(&self) -> RpcResult<serde_json::Value> {
+        let state = self.state.read().await;
+        let now = unix_now();
+        let mut peers: Vec<serde_json::Value> = state
+            .known_peers
+            .values()
+            .map(|p| {
+                let banned = p.banned_until > now;
+                serde_json::json!({
+                    "addr": p.addr,
+                    "last_seen": p.last_seen,
+                    "failures": p.consecutive_failures,
+                    "banned": banned,
+                    "source": p.source.as_str(),
+                })
+            })
+            .collect();
+        // Sort by last_seen descending (most recent first).
+        peers.sort_by(|a, b| {
+            let a_ts = a["last_seen"].as_u64().unwrap_or(0);
+            let b_ts = b["last_seen"].as_u64().unwrap_or(0);
+            b_ts.cmp(&a_ts)
+        });
         Ok(serde_json::json!({
             "count": peers.len(),
             "peers": peers,
