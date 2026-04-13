@@ -1067,10 +1067,16 @@ pub fn run_repl(
                         // Swallow key events injected by Windows
                         // Terminal's right-click "paste".  The WT
                         // paste bypasses bracketed-paste mode and
-                        // arrives as raw Key events, so we suppress
-                        // them for a short window after any right-click.
+                        // arrives as raw Key events.  We suppress
+                        // them after a right-click, EXTENDING the
+                        // window every time a new char arrives so
+                        // even a huge paste is fully swallowed.
                         if let Some(deadline) = app.suppress_keys_until {
                             if Instant::now() < deadline {
+                                // More paste text arriving — keep
+                                // the window open.
+                                app.suppress_keys_until =
+                                    Some(Instant::now() + Duration::from_millis(200));
                                 continue;
                             }
                             app.suppress_keys_until = None;
