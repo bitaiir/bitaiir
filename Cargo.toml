@@ -86,6 +86,9 @@ hex = "0.4"
 # AES-256-GCM authenticated encryption for wallet key protection.
 aes-gcm = "0.10"
 
+# Zero sensitive data (passwords, private keys) in memory on drop.
+zeroize = { version = "1", features = ["derive"] }
+
 # Argon2id memory-hard function, the core of the Proof of Aiir algorithm.
 # Pure Rust (no C bindings), works on Windows out of the box.
 argon2 = "0.5"

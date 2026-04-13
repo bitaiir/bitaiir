@@ -1430,6 +1430,13 @@ impl BitaiirApiServer for BitaiirRpcImpl {
     }
 
     async fn encrypt_wallet(&self, passphrase: String) -> RpcResult<String> {
+        // Enforce minimum passphrase strength.
+        if let Err(msg) = wallet_crypto::validate_passphrase(&passphrase) {
+            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                -10, msg, None::<()>,
+            ));
+        }
+
         let mut state = self.state.write().await;
         if state.wallet_encrypted {
             return Err(jsonrpsee::types::ErrorObjectOwned::owned(
@@ -1440,6 +1447,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         }
 
         // Derive the AES key from the passphrase.
+        // `key` is Zeroizing — zeroed in memory when dropped.
         let salt = wallet_crypto::random_salt();
         let key = wallet_crypto::derive_key(passphrase.as_bytes(), &salt);
 

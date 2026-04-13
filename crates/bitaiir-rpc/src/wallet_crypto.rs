@@ -1,10 +1,14 @@
 //! Wallet encryption using Argon2id key derivation + AES-256-GCM.
 //!
 //! The user's passphrase is stretched into a 32-byte AES key via
-//! Argon2id (16 MiB, 2 passes — fast enough for interactive use but
+//! Argon2id (32 MiB, 2 passes — fast enough for interactive use but
 //! still memory-hard against brute force).  Each private key is then
 //! encrypted with AES-256-GCM, which provides both confidentiality
 //! and authenticity (tampered ciphertext is detected on decryption).
+//!
+//! All sensitive byte arrays (`key`, `privkey`, `passphrase`) are
+//! wrapped in `Zeroizing<>` so they are zeroed in memory on drop,
+//! preventing residual secrets from lingering after use.
 //!
 //! Storage layout (all in the existing `wallet_keys` redb table):
 //!
@@ -22,6 +26,7 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::Argon2;
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 /// Salt length for Argon2id derivation.
 const SALT_LEN: usize = 16;
@@ -30,19 +35,35 @@ const NONCE_LEN: usize = 12;
 /// Known plaintext used for password verification.
 const CHECK_PLAINTEXT: &[u8; 16] = b"BitAiir Wallet!.";
 
-/// Argon2id parameters for key derivation (lighter than mining PoW).
-const KDF_MEMORY_KIB: u32 = 16_384; // 16 MiB
+/// Argon2id parameters for key derivation.
+/// 32 MiB memory cost — each brute-force attempt must allocate 32 MB,
+/// which limits GPU/ASIC attackers to a handful of attempts per core.
+const KDF_MEMORY_KIB: u32 = 32_768; // 32 MiB
 const KDF_TIME_COST: u32 = 2;
 const KDF_PARALLELISM: u32 = 1;
 
+/// Minimum passphrase length enforced by `validate_passphrase`.
+pub const MIN_PASSPHRASE_LEN: usize = 8;
+
+/// Check that a passphrase meets the minimum requirements.
+pub fn validate_passphrase(passphrase: &str) -> Result<(), String> {
+    if passphrase.len() < MIN_PASSPHRASE_LEN {
+        return Err(format!(
+            "passphrase too short (minimum {MIN_PASSPHRASE_LEN} characters)"
+        ));
+    }
+    Ok(())
+}
+
 /// Derive a 32-byte AES key from a passphrase + salt via Argon2id.
-pub fn derive_key(passphrase: &[u8], salt: &[u8]) -> [u8; 32] {
+/// The returned key is wrapped in `Zeroizing` so it is zeroed on drop.
+pub fn derive_key(passphrase: &[u8], salt: &[u8]) -> Zeroizing<[u8; 32]> {
     let params = argon2::Params::new(KDF_MEMORY_KIB, KDF_TIME_COST, KDF_PARALLELISM, Some(32))
         .expect("valid argon2 params");
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let mut key = [0u8; 32];
+    let mut key = Zeroizing::new([0u8; 32]);
     argon2
-        .hash_password_into(passphrase, salt, &mut key)
+        .hash_password_into(passphrase, salt, key.as_mut())
         .expect("argon2 key derivation");
     key
 }
@@ -75,9 +96,9 @@ pub fn encrypt_privkey(key: &[u8; 32], privkey: &[u8; 32]) -> Vec<u8> {
 }
 
 /// Decrypt a private key from `nonce(12) + ciphertext(48)`.
-/// Returns the 32-byte private key, or `None` if decryption fails
-/// (wrong password or tampered data).
-pub fn decrypt_privkey(key: &[u8; 32], encrypted: &[u8]) -> Option<[u8; 32]> {
+/// Returns the 32-byte private key wrapped in `Zeroizing`, or `None`
+/// if decryption fails (wrong password or tampered data).
+pub fn decrypt_privkey(key: &[u8; 32], encrypted: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
     if encrypted.len() < NONCE_LEN + 16 {
         return None;
     }
@@ -88,7 +109,7 @@ pub fn decrypt_privkey(key: &[u8; 32], encrypted: &[u8]) -> Option<[u8; 32]> {
     if plaintext.len() != 32 {
         return None;
     }
-    let mut privkey = [0u8; 32];
+    let mut privkey = Zeroizing::new([0u8; 32]);
     privkey.copy_from_slice(&plaintext);
     Some(privkey)
 }
