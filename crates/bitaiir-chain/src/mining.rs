@@ -393,6 +393,102 @@ pub fn mine_block_from_params(
     }
 }
 
+// -------------------------------------------------------------------------
+// Multi-threaded mining
+// -------------------------------------------------------------------------
+
+/// Mine a block using `num_threads` parallel threads, each searching a
+/// different nonce partition.  The first thread to find a valid PoW
+/// signals the others to stop via a shared `AtomicBool`.
+///
+/// `shutdown` is an external cancellation flag (e.g. from the daemon's
+/// Ctrl-C handler). If set, mining aborts early and returns `None`.
+///
+/// **Memory note**: each thread runs one Argon2id invocation at a time,
+/// allocating `AIIR_POW_MEMORY_KIB` (64 MiB production / 256 KiB test).
+/// With 4 threads that's 256 MiB of concurrent RAM usage.
+#[allow(clippy::too_many_arguments)]
+pub fn mine_block_parallel(
+    prev_block_hash: Hash256,
+    height: u64,
+    bits: u32,
+    user_txs: Vec<Transaction>,
+    miner_recipient_hash: [u8; 20],
+    network_time: u64,
+    num_threads: usize,
+    shutdown: &std::sync::atomic::AtomicBool,
+) -> Option<Block> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let subsidy_amount = subsidy(height);
+    let total_fees = Amount::ZERO;
+    let coinbase_amount = subsidy_amount
+        .checked_add(total_fees)
+        .unwrap_or(subsidy_amount);
+
+    let coinbase = build_coinbase(height, miner_recipient_hash, coinbase_amount);
+
+    let mut transactions = Vec::with_capacity(1 + user_txs.len());
+    transactions.push(coinbase);
+    transactions.extend(user_txs);
+
+    let merkle_root = {
+        let txids: Vec<Hash256> = transactions.iter().map(|tx| tx.txid()).collect();
+        bitaiir_types::merkle_root(&txids)
+    };
+
+    let header = BlockHeader {
+        version: 1,
+        prev_block_hash,
+        merkle_root,
+        timestamp: network_time,
+        bits,
+        nonce: 0,
+    };
+
+    let target = CompactTarget::from_bits(bits);
+    let found = AtomicBool::new(false);
+    let winning_nonce = std::sync::atomic::AtomicU32::new(0);
+    let num_threads = num_threads.max(1);
+
+    std::thread::scope(|s| {
+        for thread_id in 0..num_threads {
+            let found = &found;
+            let winning_nonce = &winning_nonce;
+            let mut h = header;
+            h.nonce = thread_id as u32;
+            let stride = num_threads as u32;
+
+            s.spawn(move || {
+                loop {
+                    if found.load(Ordering::Relaxed) || shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let pow_hash = aiir_pow(&h);
+                    if target.hash_meets_target(pow_hash.as_bytes()) {
+                        winning_nonce.store(h.nonce, Ordering::Relaxed);
+                        found.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    h.nonce = h.nonce.wrapping_add(stride);
+                }
+            });
+        }
+    });
+
+    if shutdown.load(Ordering::Relaxed) && !found.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let mut final_header = header;
+    final_header.nonce = winning_nonce.load(Ordering::Relaxed);
+
+    Some(Block {
+        header: final_header,
+        transactions,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -58,6 +58,11 @@ struct Args {
     /// `--connect 1.2.3.4:8444 --connect 5.6.7.8:8444`
     #[arg(long = "connect", value_name = "HOST:PORT")]
     connect: Vec<String>,
+    /// Number of parallel mining threads (default: half the CPU cores).
+    /// Each thread allocates ~64 MiB for Argon2id, so 4 threads use
+    /// ~256 MiB of RAM during mining.
+    #[arg(long, default_value_t = 0)]
+    mining_threads: usize,
 }
 
 fn unix_now() -> u64 {
@@ -467,9 +472,7 @@ async fn main() {
 
     // --- Mining in background thread ------------------------------------- //
 
-    if args.mine {
-        info!("Mining enabled (--mine).");
-    } else if !args.interactive {
+    if !args.mine && !args.interactive {
         info!("Mining disabled. Use --mine flag to enable.");
     }
 
@@ -479,6 +482,21 @@ async fn main() {
     let mining_recipient = miner_recipient_hash;
     let is_interactive = args.interactive;
     let mining_storage = storage.clone();
+    // Resolve mining thread count: 0 = auto (half of CPU cores, min 1).
+    // Default: min(4, cores/2) — beyond 4 threads Argon2id saturates
+    // the memory bus and adding threads hurts more than it helps.
+    let mining_threads = if args.mining_threads > 0 {
+        args.mining_threads
+    } else {
+        std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).max(1).min(4))
+            .unwrap_or(1)
+    };
+
+    if args.mine {
+        info!("Mining enabled (--mine), {mining_threads} thread(s).");
+    }
+
     // Clone so the TUI (spawned below) can still use `log_tx` after
     // the mining task takes ownership of its own clone.
     let mining_log_tx = log_tx.clone();
@@ -509,11 +527,18 @@ async fn main() {
                 let h2 = format!("  {}", "-".repeat(74));
                 if is_interactive {
                     let _ = log_tx.send(String::new());
-                    let _ = log_tx.send("  Mining started.".into());
+                    let _ = log_tx.send(format!(
+                        "  Mining started ({mining_threads} thread{}).",
+                        if mining_threads == 1 { "" } else { "s" }
+                    ));
                     let _ = log_tx.send(h1);
                     let _ = log_tx.send(h2);
                 } else {
                     println!();
+                    println!(
+                        "  Mining started ({mining_threads} thread{}).",
+                        if mining_threads == 1 { "" } else { "s" }
+                    );
                     println!("{h1}");
                     println!("{h2}");
                 }
@@ -532,16 +557,21 @@ async fn main() {
                 (tip, h, b, txs)
             };
 
-            // Mine (NO lock held).
+            // Mine with N parallel threads (NO lock held).
             let start = Instant::now();
-            let block = bitaiir_chain::mine_block_from_params(
+            let Some(block) = bitaiir_chain::mine_block_parallel(
                 prev_hash,
                 next_height,
                 bits,
                 user_txs,
                 mining_recipient,
                 timestamp,
-            );
+                mining_threads,
+                &mining_shutdown,
+            ) else {
+                // Mining was cancelled (daemon shutting down).
+                break;
+            };
             let elapsed = start.elapsed();
 
             // Validate, commit, and persist (short write lock).
