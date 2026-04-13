@@ -376,6 +376,11 @@ pub trait BitaiirApi {
         amount: f64,
     ) -> RpcResult<serde_json::Value>;
 
+    /// List all transactions involving an address (sent and received),
+    /// in reverse chronological order (newest first).
+    #[method(name = "gettransactionhistory")]
+    async fn get_transaction_history(&self, address: String) -> RpcResult<serde_json::Value>;
+
     #[method(name = "getmempoolinfo")]
     async fn get_mempool_info(&self) -> RpcResult<serde_json::Value>;
 
@@ -824,6 +829,177 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             "change": format!("{}", Amount::from_atomic(change)),
             "peers_notified": peers_notified,
             "status": "added to mempool",
+        }))
+    }
+
+    async fn get_transaction_history(&self, address: String) -> RpcResult<serde_json::Value> {
+        let target_hash = address_to_recipient_hash(&address).ok_or_else(|| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                -1,
+                format!("invalid address: {address}"),
+                None::<()>,
+            )
+        })?;
+
+        let state = self.state.read().await;
+        let tip = state.chain.height();
+        let rec_confs = bitaiir_chain::consensus::RECOMMENDED_CONFIRMATIONS;
+        let mut history: Vec<serde_json::Value> = Vec::new();
+
+        // Scan the chain from genesis to tip.
+        for h in 0..=tip {
+            let Some(block) = state.chain.block_at(h) else {
+                continue;
+            };
+            let timestamp = block.header.timestamp;
+            let confs = tip.saturating_sub(h);
+
+            for tx in &block.transactions {
+                let txid = tx.txid();
+                let is_coinbase = tx.is_coinbase();
+
+                // Check if we RECEIVED in this tx (outputs to our address).
+                let mut received: u64 = 0;
+                for out in &tx.outputs {
+                    if out.recipient_hash == target_hash {
+                        received += out.amount.to_atomic();
+                    }
+                }
+
+                // Check if we SENT from this tx (inputs signed by our key).
+                let mut sent: u64 = 0;
+                let mut is_sender = false;
+                if !is_coinbase {
+                    for inp in &tx.inputs {
+                        if !inp.pubkey.is_empty() {
+                            let pk_hash = hash160(&inp.pubkey);
+                            if pk_hash == target_hash {
+                                is_sender = true;
+                            }
+                        }
+                    }
+                    if is_sender {
+                        // Amount sent = outputs NOT going to our address.
+                        for out in &tx.outputs {
+                            if out.recipient_hash != target_hash {
+                                sent += out.amount.to_atomic();
+                            }
+                        }
+                    }
+                }
+
+                // Skip txs that don't involve this address at all.
+                if received == 0 && !is_sender {
+                    continue;
+                }
+
+                let status = if confs >= rec_confs {
+                    "confirmed"
+                } else {
+                    "unconfirmed"
+                };
+
+                if is_coinbase && received > 0 {
+                    history.push(serde_json::json!({
+                        "txid": txid.to_string(),
+                        "type": "coinbase",
+                        "amount": format!("{}", Amount::from_atomic(received)),
+                        "block_height": h,
+                        "timestamp": timestamp,
+                        "confirmations": confs,
+                        "status": status,
+                    }));
+                } else if is_sender && received > 0 {
+                    // Sent but also got change back — show as "send".
+                    history.push(serde_json::json!({
+                        "txid": txid.to_string(),
+                        "type": "send",
+                        "amount": format!("-{}", Amount::from_atomic(sent)),
+                        "block_height": h,
+                        "timestamp": timestamp,
+                        "confirmations": confs,
+                        "status": status,
+                    }));
+                } else if is_sender {
+                    history.push(serde_json::json!({
+                        "txid": txid.to_string(),
+                        "type": "send",
+                        "amount": format!("-{}", Amount::from_atomic(sent)),
+                        "block_height": h,
+                        "timestamp": timestamp,
+                        "confirmations": confs,
+                        "status": status,
+                    }));
+                } else if received > 0 {
+                    history.push(serde_json::json!({
+                        "txid": txid.to_string(),
+                        "type": "receive",
+                        "amount": format!("+{}", Amount::from_atomic(received)),
+                        "block_height": h,
+                        "timestamp": timestamp,
+                        "confirmations": confs,
+                        "status": status,
+                    }));
+                }
+            }
+        }
+
+        // Also check the mempool for pending txs.
+        for (_txid_hash, tx) in state.mempool.iter() {
+            let txid = tx.txid();
+            let mut received: u64 = 0;
+            for out in &tx.outputs {
+                if out.recipient_hash == target_hash {
+                    received += out.amount.to_atomic();
+                }
+            }
+            let mut sent: u64 = 0;
+            let mut is_sender = false;
+            for inp in &tx.inputs {
+                if !inp.pubkey.is_empty() {
+                    let pk_hash = hash160(&inp.pubkey);
+                    if pk_hash == target_hash {
+                        is_sender = true;
+                    }
+                }
+            }
+            if is_sender {
+                for out in &tx.outputs {
+                    if out.recipient_hash != target_hash {
+                        sent += out.amount.to_atomic();
+                    }
+                }
+            }
+            if is_sender {
+                history.push(serde_json::json!({
+                    "txid": txid.to_string(),
+                    "type": "send",
+                    "amount": format!("-{}", Amount::from_atomic(sent)),
+                    "block_height": null,
+                    "timestamp": null,
+                    "confirmations": 0,
+                    "status": "pending (mempool)",
+                }));
+            } else if received > 0 {
+                history.push(serde_json::json!({
+                    "txid": txid.to_string(),
+                    "type": "receive",
+                    "amount": format!("+{}", Amount::from_atomic(received)),
+                    "block_height": null,
+                    "timestamp": null,
+                    "confirmations": 0,
+                    "status": "pending (mempool)",
+                }));
+            }
+        }
+
+        // Reverse so newest first.
+        history.reverse();
+
+        Ok(serde_json::json!({
+            "address": address,
+            "count": history.len(),
+            "transactions": history,
         }))
     }
 
