@@ -107,3 +107,46 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
+
+  # -----------------------------------------------------------------------
+  # RISC-V cross-compilation check.
+  #
+  # Validates that every crate in the workspace compiles for riscv64gc,
+  # the 64-bit RISC-V target with general-purpose + compressed ISA
+  # extensions.  This is a *build* check, not a test run — we can't
+  # execute RISC-V binaries on an x86 runner.
+  #
+  # Why it matters: RISC-V is open-source hardware with no royalties.
+  # Ensuring BitAiir builds on it means anyone with a $10–50 SBC can
+  # run a full node and mine, which aligns with the "democratized
+  # mining" goal of Proof of Aiir.
+  # -----------------------------------------------------------------------
+  build-riscv64:
+    name: build (riscv64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + RISC-V target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-linux-gnu
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-riscv64-linux-gnu \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: riscv64
+
+      - name: cargo build --target riscv64gc
+        run: cargo build --workspace --target riscv64gc-unknown-linux-gnu --locked
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
