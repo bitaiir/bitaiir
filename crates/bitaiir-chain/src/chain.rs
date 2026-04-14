@@ -1,12 +1,14 @@
 //! In-memory chain state: the set of known blocks plus the linear
 //! main chain from genesis to tip.
 //!
-//! Phase 1b is deliberately minimal. The [`Chain`] container stores
-//! full blocks by hash and tracks a single linear main chain. It
-//! supports the happy-path append (`push`) and read-only queries
-//! (`tip`, `height`, `block_at`, `header_at`, `block`, `contains`),
-//! and nothing else. Reorgs, fork choice, orphan tracking, and
-//! consensus validation all belong to later phases.
+//! The [`Chain`] container stores full blocks by hash, tracks which
+//! of those form the main chain, and records the cumulative
+//! proof-of-work ("chain work") for every known block.  Chain work
+//! is the fork-choice metric: when two chains disagree on the tip,
+//! the one with greater cumulative work is the main chain.  Height
+//! is not a sufficient metric — two chains can be equal height with
+//! different cumulative work, and in general the "most work" chain
+//! is always the consensus winner.
 //!
 //! `push` enforces *structural* invariants only:
 //!
@@ -14,15 +16,16 @@
 //! 2. The new block's hash must not already be known to the chain.
 //!
 //! It does **not** check proof of work, merkle roots, transaction
-//! validity, or the coinbase subsidy cap — Phase 1c will add a
-//! `validate_block` step that callers must run before handing a
-//! block to `push`.
+//! validity, or the coinbase subsidy cap — callers are responsible
+//! for running `validate_block` first.
 
 use std::collections::HashMap;
 
 use bitaiir_types::{Block, BlockHeader, Hash256};
+use primitive_types::U256;
 
 use crate::error::{Error, Result};
+use crate::target::CompactTarget;
 
 /// An in-memory blockchain.
 ///
@@ -38,6 +41,12 @@ pub struct Chain {
     /// tip. Never empty by construction — every constructor stores
     /// at least one block.
     main_chain: Vec<Hash256>,
+    /// Cumulative proof of work from the genesis block up to and
+    /// including the keyed block.  Populated for every entry in
+    /// `blocks`.  The genesis block is assigned zero work as an
+    /// arbitrary baseline — only *differences* between chain-work
+    /// values matter for fork choice, not the absolute magnitude.
+    chain_work: HashMap<Hash256, U256>,
 }
 
 impl Chain {
@@ -45,14 +54,19 @@ impl Chain {
     ///
     /// The genesis block is stored both in the block map and as the
     /// only entry in the main chain. Downstream code never observes
-    /// an empty chain.
+    /// an empty chain.  The genesis block is assigned zero chain
+    /// work as a baseline — only *differences* between chain-work
+    /// values are meaningful for fork choice.
     pub fn with_genesis(genesis: Block) -> Self {
         let hash = genesis.block_hash();
         let mut blocks = HashMap::new();
         blocks.insert(hash, genesis);
+        let mut chain_work = HashMap::new();
+        chain_work.insert(hash, U256::zero());
         Self {
             blocks,
             main_chain: vec![hash],
+            chain_work,
         }
     }
 
@@ -117,15 +131,36 @@ impl Chain {
         false
     }
 
+    /// Cumulative chain work at the current tip.
+    ///
+    /// This is the fork-choice metric: the main chain is always the
+    /// one with the greatest cumulative work.  Two competing chains
+    /// of equal height can have different `tip_work()` values — the
+    /// one with more work wins.
+    pub fn tip_work(&self) -> U256 {
+        *self
+            .chain_work
+            .get(&self.tip())
+            .expect("chain_work populated for every block on the main chain")
+    }
+
+    /// Cumulative chain work up to and including the block with the
+    /// given hash.  Returns `None` if the hash is unknown.
+    pub fn work_of(&self, hash: &Hash256) -> Option<U256> {
+        self.chain_work.get(hash).copied()
+    }
+
     /// Append a block to the main chain.
     ///
     /// Returns [`Error::ParentMismatch`] if `block.header.prev_block_hash`
     /// does not equal the current tip, or [`Error::DuplicateBlock`]
     /// if the block hash is already known.
     ///
+    /// On success the block's cumulative chain work is recorded as
+    /// `parent_work + work_of(block.header.bits)`.
+    ///
     /// This method assumes the caller has already validated the
-    /// block under consensus rules. Phase 1b performs no such
-    /// checks; a later phase will.
+    /// block under consensus rules.
     pub fn push(&mut self, block: Block) -> Result<()> {
         let block_hash = block.block_hash();
 
@@ -141,8 +176,20 @@ impl Chain {
             });
         }
 
+        // Chain work extends from the parent's accumulated work by
+        // the proof-of-work this block represents under its declared
+        // difficulty.
+        let parent_work = self
+            .chain_work
+            .get(&expected_parent)
+            .copied()
+            .expect("parent is on the main chain, chain_work populated");
+        let block_work = CompactTarget::from_bits(block.header.bits).work();
+        let new_work = parent_work.saturating_add(block_work);
+
         self.blocks.insert(block_hash, block);
         self.main_chain.push(block_hash);
+        self.chain_work.insert(block_hash, new_work);
 
         Ok(())
     }
@@ -277,5 +324,78 @@ mod tests {
         assert!(rendered.contains("height"));
         assert!(rendered.contains("tip"));
         assert!(rendered.contains("known_blocks"));
+    }
+
+    // --- chain_work / fork-choice metric tests -------------------------- //
+
+    #[test]
+    fn fresh_chain_tip_work_is_zero() {
+        let genesis = sample_block(Hash256::ZERO, 0);
+        let chain = Chain::with_genesis(genesis);
+        assert!(chain.tip_work().is_zero());
+    }
+
+    #[test]
+    fn work_of_unknown_hash_is_none() {
+        let genesis = sample_block(Hash256::ZERO, 0);
+        let chain = Chain::with_genesis(genesis);
+        let random = Hash256::from_bytes([0xab; 32]);
+        assert!(chain.work_of(&random).is_none());
+    }
+
+    #[test]
+    fn push_accumulates_chain_work() {
+        let genesis = sample_block(Hash256::ZERO, 0);
+        let genesis_hash = genesis.block_hash();
+        let genesis_bits = genesis.header.bits;
+        let mut chain = Chain::with_genesis(genesis);
+
+        // Baseline.
+        assert!(chain.tip_work().is_zero());
+
+        let block_1 = sample_block(genesis_hash, 1);
+        let block_1_hash = block_1.block_hash();
+        let block_1_bits = block_1.header.bits;
+        chain.push(block_1).expect("push block 1");
+
+        // After one push, tip work must equal a single block's
+        // worth of work under its bits.
+        let expected_after_1 = CompactTarget::from_bits(block_1_bits).work();
+        assert_eq!(chain.tip_work(), expected_after_1);
+        assert_eq!(chain.work_of(&block_1_hash).unwrap(), expected_after_1);
+
+        // Genesis keeps zero work — we didn't touch it.
+        assert!(chain.work_of(&genesis_hash).unwrap().is_zero());
+        // (Just exercises `genesis_bits` so the variable isn't dead.)
+        assert_eq!(genesis_bits, chain.genesis().header.bits);
+
+        let block_2 = sample_block(block_1_hash, 2);
+        let block_2_hash = block_2.block_hash();
+        let block_2_bits = block_2.header.bits;
+        chain.push(block_2).expect("push block 2");
+
+        // Two blocks: cumulative work is the sum of the two
+        // individual block-work values.
+        let expected_after_2 = CompactTarget::from_bits(block_1_bits).work()
+            + CompactTarget::from_bits(block_2_bits).work();
+        assert_eq!(chain.tip_work(), expected_after_2);
+        assert_eq!(chain.work_of(&block_2_hash).unwrap(), expected_after_2);
+    }
+
+    #[test]
+    fn rejected_push_does_not_change_work() {
+        let genesis = sample_block(Hash256::ZERO, 0);
+        let genesis_hash = genesis.block_hash();
+        let mut chain = Chain::with_genesis(genesis);
+
+        let block_1 = sample_block(genesis_hash, 1);
+        chain.push(block_1).expect("push block 1");
+        let work_before = chain.tip_work();
+
+        // Wrong parent → rejected → chain state unchanged, including
+        // chain_work.
+        let orphan = sample_block(Hash256::from_bytes([0xde; 32]), 2);
+        assert!(chain.push(orphan).is_err());
+        assert_eq!(chain.tip_work(), work_before);
     }
 }

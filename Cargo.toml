@@ -127,6 +127,12 @@ toml = "0.8"
 # SipHash-2-4 for compact-block short IDs (BIP 152 style).
 siphasher = "1"
 
+# Fixed-width big integers for cumulative chain work calculation.
+# `U256` is the standard type in the crypto ecosystem; arithmetic
+# over 256-bit values is what we need for Bitcoin-style "most work
+# wins" fork choice.
+primitive-types = { version = "0.12", default-features = false, features = ["std"] }
+
 # Release profile: optimize hard, strip symbols, abort on panic for smaller
 # binaries. We override this for benchmarks if/when we add them.
 [profile.release]

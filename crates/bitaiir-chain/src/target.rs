@@ -16,6 +16,14 @@
 //! This module contains the encoding itself, not the retarget
 //! algorithm; adjustment rules live in a later phase alongside the
 //! chain state they depend on.
+//!
+//! [`CompactTarget::work`] returns the "proof of work" of a single
+//! block under this target, as a 256-bit integer.  Summing `work()`
+//! over every block in a chain gives that chain's cumulative work,
+//! which is the fork-choice metric: when two chains disagree on the
+//! main chain, the one with more total work wins.
+
+use primitive_types::U256;
 
 /// A compact 32-bit difficulty target, stored in block headers as
 /// `bits`. Construct with [`CompactTarget::from_bits`] or the
@@ -106,6 +114,41 @@ impl CompactTarget {
             Some(target) => hash <= &target,
             None => false,
         }
+    }
+
+    /// Return the amount of "proof of work" a block with this target
+    /// represents, as a 256-bit integer.
+    ///
+    /// Intuitively: how many hashes, on average, a miner has to try
+    /// before producing a valid block under this target.  The lower
+    /// the target, the more hashes are needed, the higher the work.
+    /// Summing `work()` across every block in a chain yields the
+    /// chain's **cumulative work** — the fork-choice metric.
+    ///
+    /// Formula (matches Bitcoin Core's `GetBlockProof`):
+    ///
+    /// ```text
+    ///   work = floor(2^256 / (target + 1))
+    ///        = (~target) / (target + 1) + 1
+    /// ```
+    ///
+    /// The second form is used because `2^256` doesn't fit in a
+    /// `U256`.  Structurally invalid targets (see [`Self::to_target`])
+    /// return zero work — no work should be credited for a malformed
+    /// header.
+    pub fn work(self) -> U256 {
+        let Some(target_bytes) = self.to_target() else {
+            return U256::zero();
+        };
+        let target = U256::from_big_endian(&target_bytes);
+        // A target of zero is unreachable in practice (the mantissa's
+        // sign-bit check rejects it, and the initial target has
+        // non-zero bytes) but we guard defensively so the divisor
+        // `target + 1` never wraps to zero.
+        if target.is_zero() {
+            return U256::zero();
+        }
+        (!target) / (target + U256::one()) + U256::one()
     }
 }
 
@@ -220,5 +263,54 @@ mod tests {
         // This is the initial difficulty value: max exponent that
         // keeps the mantissa inside the 32-byte buffer.
         assert!(CompactTarget::from_bits(0x2000_ffff).to_target().is_some());
+    }
+
+    // --- work() / cumulative chain-work tests --------------------------- //
+
+    #[test]
+    fn lower_target_means_more_work() {
+        // A block with lower difficulty (easy target) takes fewer
+        // hashes to mine, so carries less work than a block with a
+        // higher difficulty (hard target).  0x1d00ffff is Bitcoin's
+        // minimum difficulty, considerably harder than the initial
+        // 0x2000ffff used in our genesis.
+        let easy = CompactTarget::INITIAL.work();
+        let hard = CompactTarget::from_bits(0x1d00_ffff).work();
+        assert!(hard > easy, "harder target must carry more work");
+    }
+
+    #[test]
+    fn invalid_target_has_zero_work() {
+        // Negative mantissa → no valid target → no work credited.
+        let ct = CompactTarget::from_bits(0x2080_0000);
+        assert!(ct.work().is_zero());
+    }
+
+    #[test]
+    fn equal_targets_produce_equal_work() {
+        // Fork-choice sanity: two blocks mined under identical
+        // difficulty contribute the same amount of work.
+        let a = CompactTarget::from_bits(0x1d00_ffff).work();
+        let b = CompactTarget::from_bits(0x1d00_ffff).work();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn initial_target_work_matches_expected_magnitude() {
+        // The initial target is `0x00ffff000...00` (32 bytes) which
+        // as U256 is approximately `0xffff * 2^232`.  Plugging into
+        // the formula:
+        //
+        //   work ≈ 2^256 / (0xffff * 2^232) ≈ 2^24 / 0xffff ≈ 256
+        //
+        // The exact value is 257 after the `+1` adjustment.  We
+        // assert a small window around it so the test is robust to
+        // any rounding in the formula.
+        let w = CompactTarget::INITIAL.work();
+        assert!(!w.is_zero());
+        assert!(
+            w >= U256::from(200u32) && w <= U256::from(300u32),
+            "initial-target work {w} outside expected [200, 300] window",
+        );
     }
 }
