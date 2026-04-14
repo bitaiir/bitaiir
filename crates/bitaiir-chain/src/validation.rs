@@ -163,6 +163,76 @@ pub fn validate_transaction(
 // Block validation (protocol §7.4)
 // -------------------------------------------------------------------------
 
+/// Check the subset of block-validity rules that depend **only on
+/// the block itself**, not on any chain or UTXO state.
+///
+/// Used to reject obviously-bad blocks received from peers before
+/// paying the cost of storing them or running stateful validation.
+/// It's also the validation that's available for side-chain blocks,
+/// where the UTXO state at the block's position can't easily be
+/// reconstructed until the chain actually reorgs to that branch.
+///
+/// Rules checked:
+/// - **1**: serialized size ≤ `MAX_BLOCK_SIZE`.
+/// - **2**: proof of work (`aiir_pow(header)` ≤ target from `bits`).
+/// - **7**: header merkle root matches the computed merkle root.
+/// - **8**: first transaction is a coinbase.
+/// - **10**: no duplicate transactions within the block.
+///
+/// Rules NOT checked here (they need chain/UTXO context):
+///   parent linkage, retarget bits, timestamp vs MTP, timestamp vs
+///   network time, input existence, tx signatures, coinbase overspend.
+pub fn validate_block_standalone(block: &Block) -> Result<()> {
+    let header = &block.header;
+
+    // Rule 1: block size.
+    let block_bytes = encoding::to_bytes(block).expect("Block always encodes");
+    if block_bytes.len() > MAX_BLOCK_SIZE {
+        return Err(Error::BlockTooLarge {
+            size: block_bytes.len(),
+            max: MAX_BLOCK_SIZE,
+        });
+    }
+
+    // Rule 2: proof of work.
+    let pow_hash = aiir_pow(header);
+    let target = CompactTarget::from_bits(header.bits);
+    if !target.hash_meets_target(pow_hash.as_bytes()) {
+        return Err(Error::InsufficientProofOfWork);
+    }
+
+    // Rule 7: merkle root.
+    let computed_merkle = block.compute_merkle_root();
+    if header.merkle_root != computed_merkle {
+        return Err(Error::MerkleRootMismatch {
+            header: header.merkle_root,
+            computed: computed_merkle,
+        });
+    }
+
+    // Rule 8: first transaction must be a coinbase.
+    let coinbase = block.transactions.first().ok_or(Error::InvalidCoinbase {
+        reason: "block has no transactions",
+    })?;
+    if !coinbase.is_coinbase() {
+        return Err(Error::InvalidCoinbase {
+            reason: "first transaction is not a coinbase",
+        });
+    }
+
+    // Rule 10: no duplicate transactions.
+    let mut seen_txids: HashSet<bitaiir_types::Hash256> =
+        HashSet::with_capacity(block.transactions.len());
+    for tx in &block.transactions {
+        let txid = tx.txid();
+        if !seen_txids.insert(txid) {
+            return Err(Error::DuplicateTransaction(txid));
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate a full block against the chain tip and UTXO set.
 ///
 /// `network_time` is the node's current adjusted time in seconds

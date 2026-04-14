@@ -23,6 +23,20 @@ pub enum Error {
     #[error("block {0} is already in the chain")]
     DuplicateBlock(Hash256),
 
+    /// A block's `prev_block_hash` is not in the chain's block index.
+    /// Returned by `accept_block` when the parent hasn't been seen —
+    /// callers can stash such blocks in an orphan pool and retry once
+    /// the parent arrives.
+    #[error("block's parent {0} is not known to the chain")]
+    UnknownParent(Hash256),
+
+    /// Internal invariant violation while walking a chain from a tip
+    /// back to the common ancestor (e.g. a block's parent hash is
+    /// not in the block index mid-walk).  This indicates corruption
+    /// or a programming bug — never user input.
+    #[error("chain traversal from {tip} failed at {at}: missing parent link")]
+    BrokenChainLink { tip: Hash256, at: Hash256 },
+
     // --- UTXO set errors ------------------------------------------------- //
     /// A transaction tried to spend an outpoint not in the UTXO set.
     #[error("utxo set is missing the outpoint being spent: {0}")]

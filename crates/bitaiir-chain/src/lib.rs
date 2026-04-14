@@ -61,7 +61,7 @@ pub mod validation;
 #[cfg(test)]
 mod test_util;
 
-pub use chain::Chain;
+pub use chain::{AcceptOutcome, Chain};
 pub use error::{Error, Result};
 pub use genesis::mine_genesis;
 pub use mempool::Mempool;
@@ -73,4 +73,4 @@ pub use subsidy::{BLOCKS_PER_HALVING, INITIAL_SUBSIDY, TAIL_EMISSION, subsidy};
 pub use target::CompactTarget;
 pub use tx_pow::{mine_tx_pow, validate_tx_pow};
 pub use utxo::{BlockUndo, SpentInput, UtxoSet};
-pub use validation::{validate_block, validate_transaction};
+pub use validation::{validate_block, validate_block_standalone, validate_transaction};
