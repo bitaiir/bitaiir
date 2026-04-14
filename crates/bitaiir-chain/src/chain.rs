@@ -178,6 +178,31 @@ impl Chain {
             .map(|i| i as u64)
     }
 
+    /// Take a cheap snapshot of the current main-chain hash list.
+    /// Paired with [`Self::restore_main_chain`], this lets the reorg
+    /// orchestrator save the pre-reorg main chain before mutating
+    /// and restore it atomically if anything fails mid-reorg.
+    ///
+    /// Only the `main_chain` `Vec<Hash256>` is cloned — the block
+    /// index and `chain_work` map are untouched, so snapshot +
+    /// restore is O(chain height), not O(known blocks).
+    pub fn main_chain_snapshot(&self) -> Vec<Hash256> {
+        self.main_chain.clone()
+    }
+
+    /// Restore the main-chain pointer from a previous
+    /// [`Self::main_chain_snapshot`] result.  Every hash in the
+    /// snapshot must still be present in the block index — if the
+    /// caller passes a snapshot taken from a different chain the
+    /// `debug_assert!` catches the bug in debug builds.
+    pub fn restore_main_chain(&mut self, snapshot: Vec<Hash256>) {
+        debug_assert!(
+            snapshot.iter().all(|h| self.blocks.contains_key(h)),
+            "restore_main_chain: snapshot contains hashes absent from the block index",
+        );
+        self.main_chain = snapshot;
+    }
+
     /// Number of blocks in the main chain, including the genesis.
     pub fn len(&self) -> usize {
         self.main_chain.len()
@@ -794,6 +819,43 @@ mod tests {
         // longer on the main chain).
         assert!(chain.contains(&block_a_hash));
         assert!(chain.contains(&block_b_hash));
+    }
+
+    #[test]
+    fn main_chain_snapshot_and_restore_round_trip() {
+        // The reorg orchestrator relies on `main_chain_snapshot` +
+        // `restore_main_chain` being a clean round-trip so it can
+        // atomically roll back a failed reorg.  Build a short
+        // chain, snapshot, mutate, restore, and assert the tip and
+        // height are back to the pre-mutation state.
+        let genesis = sample_block(Hash256::ZERO, 0);
+        let genesis_hash = genesis.block_hash();
+        let mut chain = Chain::with_genesis(genesis);
+
+        let block_1 = sample_block(genesis_hash, 1);
+        let block_1_hash = block_1.block_hash();
+        chain.push(block_1).expect("push 1");
+
+        let block_2 = sample_block(block_1_hash, 2);
+        let block_2_hash = block_2.block_hash();
+        chain.push(block_2).expect("push 2");
+
+        let snapshot = chain.main_chain_snapshot();
+        assert_eq!(chain.tip(), block_2_hash);
+        assert_eq!(chain.height(), 2);
+
+        // Mutate: roll the chain back past block 2.
+        chain.rollback_main_chain_to(genesis_hash);
+        assert_eq!(chain.tip(), genesis_hash);
+        assert_eq!(chain.height(), 0);
+
+        // Restore snapshot — chain should look exactly like it did
+        // before the rollback.
+        chain.restore_main_chain(snapshot);
+        assert_eq!(chain.tip(), block_2_hash);
+        assert_eq!(chain.height(), 2);
+        // Intermediate block is reachable by height again.
+        assert_eq!(chain.block_at(1).unwrap().block_hash(), block_1_hash);
     }
 
     #[test]

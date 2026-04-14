@@ -954,17 +954,24 @@ async fn try_accept_and_apply_block(
     }
 }
 
-/// Drive a reorg through the stateful layers: undo the old chain's
-/// UTXO effect, re-insert its txs into the mempool, roll back
-/// `Chain.main_chain`, then validate + apply + persist each block on
-/// the new branch.
+/// Drive a reorg through the stateful layers, atomically.
 ///
-/// On any failure mid-reorg the in-memory state is **not** currently
-/// rolled back to a consistent prior snapshot — this is a known
-/// limitation.  A well-behaved peer sending a valid branch will
-/// succeed; a peer sending a branch that fails validation at apply
-/// time will leave the node in a partial state that the next restart
-/// can recover from by reloading from storage.
+/// Before touching anything the orchestrator snapshots the pieces
+/// of in-memory state that the reorg mutates — the UTXO set, the
+/// chain's main-chain pointer, and the mempool.  It then runs the
+/// full reorg **in memory only**: undo old blocks (returning their
+/// non-coinbase txs to the mempool), roll back `main_chain`, and
+/// validate + apply each block on the new branch.  If any step
+/// fails — a missing undo record, a block that fails validation,
+/// a UTXO apply error — the snapshots are dropped back in and the
+/// node returns to exactly its pre-reorg state.
+///
+/// Storage persistence only happens **after** every in-memory step
+/// has succeeded.  Persistence is still block-by-block (one redb
+/// write transaction per block) so a disk error partway through
+/// leaves storage inconsistent with the successful in-memory state
+/// — but this is recoverable on restart (peers will re-sync) and
+/// is much rarer than a validation failure.
 async fn perform_reorg(
     s: &mut tokio::sync::RwLockWriteGuard<'_, bitaiir_rpc::NodeState>,
     storage: &Arc<Storage>,
@@ -973,80 +980,107 @@ async fn perform_reorg(
     undone: &[Hash256],
     applied: &[Hash256],
 ) -> bool {
-    // 1. Undo each block on the old chain, in tip-first order.
-    for hash in undone {
-        let block = match s.chain.block(hash) {
-            Some(b) => b.clone(),
-            None => {
-                warn!("reorg: cannot load block {hash} to undo (peer {peer_key})");
-                return false;
+    // Snapshot the mutable in-memory state.  Rollback is just three
+    // assignments — cheap, and keeps the failure path trivially
+    // correct regardless of which step failed.
+    let utxo_snapshot = s.utxo.clone();
+    let main_chain_snapshot = s.chain.main_chain_snapshot();
+    let mempool_snapshot = s.mempool.clone();
+
+    // Run the whole reorg in memory first.  Each step returns
+    // `Err(msg)` on failure; the outer match restores state from
+    // snapshots before returning.
+    let applied_persist: Result<
+        Vec<(u64, bitaiir_types::Block, bitaiir_chain::BlockUndo)>,
+        String,
+    > = (|| {
+        // 1. Undo each block on the old chain, in tip-first order.
+        for hash in undone {
+            let block = s
+                .chain
+                .block(hash)
+                .ok_or_else(|| format!("cannot load block {hash} to undo"))?
+                .clone();
+            let undo = storage
+                .load_block_undo(hash)
+                .map_err(|e| format!("load_block_undo({hash}) failed: {e}"))?
+                .ok_or_else(|| format!("no undo record for block {hash}"))?;
+            s.utxo
+                .undo_block(&block, &undo)
+                .map_err(|e| format!("utxo.undo_block({hash}) failed: {e}"))?;
+            // Non-coinbase txs go back to the mempool — they were
+            // valid at their original inclusion time and may still
+            // be valid against the post-reorg UTXO state.  If
+            // they turn out to be invalid (e.g. double-spent by a
+            // new-chain tx), mining will skip them at block
+            // assembly time.
+            for tx in block.transactions.iter().skip(1) {
+                if !s.mempool.contains(&tx.txid()) {
+                    s.mempool.add(tx.clone());
+                }
             }
-        };
-        let undo = match storage.load_block_undo(hash) {
-            Ok(Some(u)) => u,
-            Ok(None) => {
-                warn!("reorg: no undo record for block {hash} (peer {peer_key})");
-                return false;
+        }
+
+        // 2. Walk `Chain.main_chain` back to the common ancestor.
+        //    From here on, `chain.tip()` matches the parent expected
+        //    by the first block we're about to apply.
+        s.chain.rollback_main_chain_to(common_ancestor);
+
+        // 3. Apply each block on the new branch in order.  Collect
+        //    the `(height, block, undo)` tuples so we can flush
+        //    them to storage after the whole in-memory reorg has
+        //    succeeded.
+        let now = unix_now();
+        let mut applied_persist: Vec<(u64, bitaiir_types::Block, bitaiir_chain::BlockUndo)> =
+            Vec::with_capacity(applied.len());
+        for hash in applied {
+            let block = s
+                .chain
+                .block(hash)
+                .ok_or_else(|| format!("cannot load new-chain block {hash}"))?
+                .clone();
+            bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200)
+                .map_err(|e| format!("new-chain block {hash} failed validation: {e}"))?;
+            let height = s.chain.height() + 1;
+            let undo = s
+                .utxo
+                .apply_block_with_undo(&block, height)
+                .map_err(|e| format!("UTXO apply of {hash} failed: {e}"))?;
+            s.chain
+                .extend_main_chain(*hash)
+                .map_err(|e| format!("extend_main_chain({hash}) failed: {e}"))?;
+            for tx in block.transactions.iter().skip(1) {
+                s.mempool.remove(&tx.txid());
             }
-            Err(e) => {
-                warn!("reorg: load_block_undo({hash}) failed: {e}");
-                return false;
-            }
-        };
-        if let Err(e) = s.utxo.undo_block(&block, &undo) {
-            warn!("reorg: utxo.undo_block({hash}) failed: {e}");
+            applied_persist.push((height, block, undo));
+        }
+        Ok(applied_persist)
+    })();
+
+    let applied_persist = match applied_persist {
+        Ok(v) => v,
+        Err(msg) => {
+            warn!("reorg aborted ({peer_key}): {msg} — restoring pre-reorg state");
+            s.utxo = utxo_snapshot;
+            s.chain.restore_main_chain(main_chain_snapshot);
+            s.mempool = mempool_snapshot;
             return false;
         }
-        // Non-coinbase txs go back to the mempool — they were valid
-        // at their original inclusion time and may still be valid
-        // against the post-reorg UTXO state.  If they turn out to
-        // be invalid (e.g. double-spent by a new-chain tx), mining
-        // will skip them at block-assembly time.
-        for tx in block.transactions.iter().skip(1) {
-            if !s.mempool.contains(&tx.txid()) {
-                s.mempool.add(tx.clone());
-            }
+    };
+
+    // 4. In-memory reorg succeeded.  Flush the new-chain blocks to
+    //    storage.  Individual `storage.apply_block` calls are
+    //    atomic in redb; if one fails, earlier ones have already
+    //    committed.  The in-memory state is consistent; storage is
+    //    only inconsistent with memory on disk errors, which are
+    //    rare and self-heal via peer resync after restart.
+    for (height, block, undo) in &applied_persist {
+        if let Err(e) = storage.apply_block(*height, block, undo) {
+            warn!("reorg persist: storage.apply_block({height}) failed: {e}");
         }
     }
 
-    // 2. Walk `Chain.main_chain` back to the common ancestor.  From
-    //    here on, `chain.tip()` matches the parent expected by the
-    //    first block we're about to apply.
-    s.chain.rollback_main_chain_to(common_ancestor);
-
-    // 3. Apply each block on the new branch in order.
-    let now = unix_now();
-    for hash in applied {
-        let block = match s.chain.block(hash) {
-            Some(b) => b.clone(),
-            None => {
-                warn!("reorg: cannot load new-chain block {hash} (peer {peer_key})");
-                return false;
-            }
-        };
-        if let Err(e) = bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200) {
-            warn!("reorg: new-chain block {hash} failed validation: {e}");
-            return false;
-        }
-        let height = s.chain.height() + 1;
-        let undo = match s.utxo.apply_block_with_undo(&block, height) {
-            Ok(u) => u,
-            Err(e) => {
-                warn!("reorg: UTXO apply of {hash} failed: {e}");
-                return false;
-            }
-        };
-        if let Err(e) = s.chain.extend_main_chain(*hash) {
-            warn!("reorg: extend_main_chain({hash}) failed: {e}");
-            return false;
-        }
-        let _ = storage.apply_block(height, &block, &undo);
-        for tx in block.transactions.iter().skip(1) {
-            s.mempool.remove(&tx.txid());
-        }
-    }
-
-    // 4. Bump the peer's best_height to the new tip height.
+    // 5. Bump the peer's best_height to the new tip height.
     let new_height = s.chain.height();
     for p in &mut s.peers {
         if p.addr == peer_key {

@@ -15,6 +15,11 @@ use std::collections::HashMap;
 use bitaiir_types::{Hash256, Transaction};
 
 /// A pool of pending, not-yet-mined transactions.
+///
+/// `Mempool` is `Clone` so the reorg orchestrator can snapshot it
+/// before shuffling transactions in and out during a reorg —
+/// allowing a full restore on reorg failure.
+#[derive(Clone)]
 pub struct Mempool {
     transactions: HashMap<Hash256, Transaction>,
 }
