@@ -26,6 +26,7 @@ pub mod encoding;
 pub mod error;
 pub mod hash;
 pub mod merkle;
+pub mod network;
 pub mod transaction;
 
 pub use amount::{ATOMIC_UNITS_PER_AIIR, Amount, MAX_SUPPLY};
@@ -33,4 +34,5 @@ pub use block::{Block, BlockHeader};
 pub use error::{Error, Result};
 pub use hash::Hash256;
 pub use merkle::merkle_root;
+pub use network::Network;
 pub use transaction::{OutPoint, Transaction, TxIn, TxOut};

@@ -36,6 +36,7 @@ use crossterm::{execute, queue};
 
 const BLUE: &str = "\x1b[38;2;18;148;215m";
 const RED: &str = "\x1b[38;2;240;80;80m";
+const YELLOW: &str = "\x1b[38;2;230;180;50m";
 const DIM: &str = "\x1b[90m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
@@ -600,19 +601,32 @@ fn screen_to_buffer(screen_col: u16, screen_row: u16, app: &App) -> Option<Point
 
 // --- Rendering ----------------------------------------------------------- //
 
-/// Format the top border with the app title embedded.
+/// Format the top border with the app title embedded.  On testnet,
+/// the network name is appended in amber so the user can tell at a
+/// glance which chain they're connected to.
 fn render_top_border(cols: u16) -> String {
     let w = cols as usize;
     if w < 30 {
         return format!("{DIM}╭{}╮{RESET}", "─".repeat(w.saturating_sub(2)));
     }
-    // Visible prefix: "╭─── BitAiir Core v0.1.0 " = 25 chars
-    let prefix_vis = 25;
-    let fill = w.saturating_sub(prefix_vis + 1);
-    format!(
-        "{DIM}╭─── {BLUE}{BOLD}BitAiir Core v0.1.0{RESET}{DIM} {}╮{RESET}",
-        "─".repeat(fill)
-    )
+    let network = bitaiir_types::Network::active();
+    if network == bitaiir_types::Network::Mainnet {
+        // Visible prefix: "╭─── BitAiir Core v0.1.0 " = 25 chars
+        let prefix_vis = 25;
+        let fill = w.saturating_sub(prefix_vis + 1);
+        format!(
+            "{DIM}╭─── {BLUE}{BOLD}BitAiir Core v0.1.0{RESET}{DIM} {}╮{RESET}",
+            "─".repeat(fill)
+        )
+    } else {
+        // Visible prefix: "╭─── BitAiir Core v0.1.0 [testnet] " = 34 chars
+        let prefix_vis = 34;
+        let fill = w.saturating_sub(prefix_vis + 1);
+        format!(
+            "{DIM}╭─── {BLUE}{BOLD}BitAiir Core v0.1.0{RESET}{DIM} {YELLOW}[testnet]{RESET}{DIM} {}╮{RESET}",
+            "─".repeat(fill)
+        )
+    }
 }
 
 /// Render the full frame.

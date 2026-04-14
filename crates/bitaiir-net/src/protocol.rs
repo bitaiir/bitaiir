@@ -16,9 +16,16 @@
 //! - payload: serialized message data
 
 use bitaiir_crypto::hash::double_sha256;
+use bitaiir_types::Network;
 
-/// Network magic bytes (protocol §10.1).
-pub const MAGIC: [u8; 4] = [0xB1, 0x7A, 0x11, 0xED];
+/// Network magic bytes (protocol §10.1) for the currently-active
+/// network.  Mainnet and testnet use distinct magic bytes so nodes
+/// on different networks cannot accidentally peer with each other
+/// — a stray connection will fail at the first header parse.
+#[inline]
+pub fn magic() -> [u8; 4] {
+    Network::active().magic()
+}
 
 /// Total size of a message header (before the payload).
 pub const HEADER_SIZE: usize = 4 + 12 + 4 + 4; // 24 bytes
@@ -54,7 +61,7 @@ pub fn frame_message(command: &str, payload: &[u8]) -> Vec<u8> {
     let cs = checksum(payload);
 
     let mut msg = Vec::with_capacity(HEADER_SIZE + payload.len());
-    msg.extend_from_slice(&MAGIC);
+    msg.extend_from_slice(&magic());
     msg.extend_from_slice(&cmd);
     msg.extend_from_slice(&len);
     msg.extend_from_slice(&cs);
@@ -72,7 +79,7 @@ pub struct MessageHeader {
 
 /// Parse a 24-byte header. Returns None if magic doesn't match.
 pub fn parse_header(buf: &[u8; HEADER_SIZE]) -> Option<MessageHeader> {
-    if buf[..4] != MAGIC {
+    if buf[..4] != magic() {
         return None;
     }
     let mut cmd_buf = [0u8; 12];

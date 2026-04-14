@@ -27,6 +27,8 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct NetworkConfig {
+    /// Run on the testnet network instead of mainnet.
+    pub testnet: Option<bool>,
     pub rpc_addr: Option<String>,
     pub p2p_addr: Option<String>,
     pub connect: Option<Vec<String>>,
@@ -44,12 +46,31 @@ pub struct StorageConfig {
 }
 
 // -------------------------------------------------------------------------
-// Defaults
+// Defaults (network-dependent — resolved at runtime)
 // -------------------------------------------------------------------------
 
-pub const DEFAULT_RPC_ADDR: &str = "127.0.0.1:8443";
-pub const DEFAULT_P2P_ADDR: &str = "127.0.0.1:8444";
-pub const DEFAULT_DATA_DIR: &str = "bitaiir_data";
+/// Default RPC address for the currently-active network.
+pub fn default_rpc_addr() -> String {
+    format!(
+        "127.0.0.1:{}",
+        bitaiir_types::Network::active().default_rpc_port()
+    )
+}
+
+/// Default P2P address for the currently-active network.
+pub fn default_p2p_addr() -> String {
+    format!(
+        "127.0.0.1:{}",
+        bitaiir_types::Network::active().default_p2p_port()
+    )
+}
+
+/// Default data directory for the currently-active network.
+pub fn default_data_dir() -> String {
+    bitaiir_types::Network::active()
+        .default_data_dir()
+        .to_string()
+}
 
 // -------------------------------------------------------------------------
 // Load / create
@@ -78,8 +99,11 @@ pub fn write_default_config(path: &Path) {
 # Uncomment and edit to customize.
 
 [network]
-# rpc_addr = "127.0.0.1:8443"
-# p2p_addr = "127.0.0.1:8444"
+# testnet = false                    # true runs the testnet network
+                                     # (different magic bytes, genesis,
+                                     # ports, and data dir)
+# rpc_addr = "127.0.0.1:8443"        # mainnet default; testnet is 18443
+# p2p_addr = "127.0.0.1:8444"        # mainnet default; testnet is 18444
 # connect = ["127.0.0.1:8544"]
 
 [mining]
@@ -87,7 +111,8 @@ pub fn write_default_config(path: &Path) {
 # threads = 0        # 0 = auto (min(4, cores/2))
 
 [storage]
-# data_dir = "bitaiir_data"
+# data_dir = "bitaiir_data"          # mainnet default;
+                                     # testnet is "bitaiir_testnet_data"
 "#;
     let _ = std::fs::write(path, template);
 }

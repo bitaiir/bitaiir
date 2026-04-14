@@ -8,7 +8,8 @@ use jsonrpsee::core::client::ClientT;
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::rpc_params;
 
-const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8443";
+const DEFAULT_MAINNET_RPC_URL: &str = "http://127.0.0.1:8443";
+const DEFAULT_TESTNET_RPC_URL: &str = "http://127.0.0.1:18443";
 
 /// Full validation of a BitAiir address: prefix + base58check + length.
 fn is_valid_address(addr: &str) -> bool {
@@ -28,9 +29,16 @@ fn is_valid_address(addr: &str) -> bool {
     version
 )]
 struct Cli {
-    /// URL of the daemon's JSON-RPC endpoint.
-    #[arg(long, default_value = DEFAULT_RPC_URL, global = true)]
-    rpc_url: String,
+    /// URL of the daemon's JSON-RPC endpoint.  Defaults to
+    /// `http://127.0.0.1:8443` (mainnet) or `http://127.0.0.1:18443`
+    /// when `--testnet` is given.
+    #[arg(long, global = true)]
+    rpc_url: Option<String>,
+
+    /// Use the testnet default RPC port (18443) when `--rpc-url` is
+    /// not given.  Has no effect if `--rpc-url` is provided.
+    #[arg(long, global = true)]
+    testnet: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -126,10 +134,18 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
+    let rpc_url = cli.rpc_url.clone().unwrap_or_else(|| {
+        if cli.testnet {
+            DEFAULT_TESTNET_RPC_URL.to_string()
+        } else {
+            DEFAULT_MAINNET_RPC_URL.to_string()
+        }
+    });
+
     let client = HttpClientBuilder::default()
-        .build(&cli.rpc_url)
+        .build(&rpc_url)
         .unwrap_or_else(|e| {
-            eprintln!("Error: cannot connect to {}: {e}", cli.rpc_url);
+            eprintln!("Error: cannot connect to {rpc_url}: {e}");
             std::process::exit(1);
         });
 

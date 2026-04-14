@@ -22,4 +22,4 @@ pub mod protocol;
 pub use error::{Error, Result};
 pub use message::{NetMessage, PeerAddr, VersionMessage};
 pub use peer::Peer;
-pub use protocol::MAGIC;
+pub use protocol::magic;

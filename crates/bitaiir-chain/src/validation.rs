@@ -107,9 +107,11 @@ pub fn validate_transaction(
             .get(&input.prev_out)
             .ok_or(Error::UnknownInput(input.prev_out))?;
 
-        // Check coinbase maturity (protocol §6.5).
+        // Check coinbase maturity (protocol §6.5). Read the value
+        // from the active network so testnet's shorter maturity is
+        // honored here.
         if let Some(cb_height) = utxo_set.coinbase_height(&input.prev_out) {
-            let maturity = crate::consensus::COINBASE_MATURITY;
+            let maturity = crate::consensus::coinbase_maturity();
             if current_height < cb_height + maturity {
                 let confirmations = current_height.saturating_sub(cb_height);
                 let remaining = maturity.saturating_sub(confirmations);

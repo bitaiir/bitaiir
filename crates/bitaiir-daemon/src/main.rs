@@ -41,6 +41,12 @@ struct Args {
     /// Path to the TOML config file.
     #[arg(long, default_value = "bitaiir.toml")]
     config: String,
+    /// Run on the testnet network instead of mainnet.  Testnet uses
+    /// different magic bytes, a different genesis block, faster
+    /// coinbase maturity (10 blocks), and separate default ports
+    /// (18443/18444) and data directory (`bitaiir_testnet_data`).
+    #[arg(long)]
+    testnet: bool,
     /// RPC server bind address.
     #[arg(long)]
     rpc_addr: Option<String>,
@@ -76,24 +82,27 @@ struct Settings {
 }
 
 impl Settings {
+    /// Build resolved settings.  MUST be called *after*
+    /// `Network::set_active` so that the network-dependent defaults
+    /// (ports, data dir) pick up the correct values.
     fn from_args_and_config(args: &Args, cfg: &config::Config) -> Self {
         let rpc_addr = args
             .rpc_addr
             .clone()
             .or_else(|| cfg.network.rpc_addr.clone())
-            .unwrap_or_else(|| config::DEFAULT_RPC_ADDR.to_string());
+            .unwrap_or_else(config::default_rpc_addr);
 
         let p2p_addr = args
             .p2p_addr
             .clone()
             .or_else(|| cfg.network.p2p_addr.clone())
-            .unwrap_or_else(|| config::DEFAULT_P2P_ADDR.to_string());
+            .unwrap_or_else(config::default_p2p_addr);
 
         let data_dir = args
             .data_dir
             .clone()
             .or_else(|| cfg.storage.data_dir.clone())
-            .unwrap_or_else(|| config::DEFAULT_DATA_DIR.to_string());
+            .unwrap_or_else(config::default_data_dir);
 
         let mine = args.mine || cfg.mining.enabled.unwrap_or(false);
 
@@ -142,6 +151,18 @@ async fn main() {
     let config_path = std::path::Path::new(&args.config);
     config::write_default_config(config_path);
     let cfg = config::load_config(config_path);
+
+    // Decide the active network *before* anything else reads
+    // network-dependent constants (magic bytes, genesis parameters,
+    // coinbase maturity, default ports, default data dir).  Network
+    // is locked in for the lifetime of the process.
+    let network = if args.testnet || cfg.network.testnet.unwrap_or(false) {
+        bitaiir_types::Network::Testnet
+    } else {
+        bitaiir_types::Network::Mainnet
+    };
+    network.set_active();
+
     let args = Settings::from_args_and_config(&args, &cfg);
 
     // In TUI mode, skip the tracing subscriber: raw mode means stdout
@@ -157,6 +178,7 @@ async fn main() {
     if !args.interactive {
         println!();
         println!("  BitAiir Core v0.1.0");
+        println!("  Network:    {}", network.name());
         println!("  Proof of Aiir (SHA-256d + Argon2id)");
         println!("  Target block time: 5s | Retarget every 20 blocks");
         println!("  RPC server: http://{}", args.rpc_addr);

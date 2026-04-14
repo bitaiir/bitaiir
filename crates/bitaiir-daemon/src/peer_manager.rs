@@ -52,7 +52,10 @@ pub const DNS_SEEDS: &[&str] = &[
 ];
 
 /// Default P2P port used when DNS resolution returns bare IPs.
-const DEFAULT_P2P_PORT: u16 = 8444;
+/// Reads from the active network (mainnet = 8444, testnet = 18444).
+fn default_p2p_port() -> u16 {
+    bitaiir_types::Network::active().default_p2p_port()
+}
 
 /// How often to re-resolve DNS seeds (1 hour).
 const DNS_RESOLVE_INTERVAL: Duration = Duration::from_secs(3600);
@@ -324,7 +327,7 @@ impl PeerManager {
         for &hostname in DNS_SEEDS {
             // lookup_host wants "host:port" — the port is needed for
             // the resolver API but we use our own DEFAULT_P2P_PORT.
-            let lookup = format!("{hostname}:{DEFAULT_P2P_PORT}");
+            let lookup = format!("{hostname}:{}", default_p2p_port());
             match tokio::net::lookup_host(&lookup).await {
                 Ok(addrs) => {
                     let mut s = self.state.write().await;

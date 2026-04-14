@@ -273,7 +273,7 @@ impl Wallet {
             Some(h) => h,
             None => return 0,
         };
-        let maturity = bitaiir_chain::consensus::COINBASE_MATURITY;
+        let maturity = bitaiir_chain::consensus::coinbase_maturity();
 
         let mut total: u64 = 0;
         for (outpoint, txout) in utxo.iter() {
@@ -303,7 +303,7 @@ impl Wallet {
             Some(h) => h,
             None => return (0, 0, 0),
         };
-        let maturity = bitaiir_chain::consensus::COINBASE_MATURITY;
+        let maturity = bitaiir_chain::consensus::coinbase_maturity();
         let rec_confs = bitaiir_chain::consensus::RECOMMENDED_CONFIRMATIONS;
 
         let mut confirmed: u64 = 0;
@@ -443,6 +443,8 @@ pub trait BitaiirApi {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BlockchainInfo {
+    /// Active network ("mainnet" or "testnet").
+    pub network: String,
     pub height: u64,
     pub tip: String,
     pub blocks: usize,
@@ -545,6 +547,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let state = self.state.read().await;
         let height = state.chain.height();
         Ok(BlockchainInfo {
+            network: bitaiir_types::Network::active().name().to_string(),
             height,
             tip: state.chain.tip().to_string(),
             blocks: state.chain.len(),
@@ -686,7 +689,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let (from_address, privkey, pubkey_bytes, from_hash, selected_utxos, inputs_total) = {
             let state = self.state.read().await;
             let tip_height = state.chain.height();
-            let maturity = bitaiir_chain::consensus::COINBASE_MATURITY;
+            let maturity = bitaiir_chain::consensus::coinbase_maturity();
 
             // Find a wallet address with enough *spendable* balance.
             let addresses = state.wallet.addresses();

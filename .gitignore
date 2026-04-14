@@ -144,6 +144,7 @@ dmypy.json
 
 # BitAiir data directory (blockchain database, wallet keys)
 bitaiir_data/
+bitaiir_testnet_data/
 data_a/
 data_b/
 

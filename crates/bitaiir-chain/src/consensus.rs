@@ -17,7 +17,21 @@ pub const MAX_TX_SIZE: usize = 100_000;
 
 /// Number of blocks a coinbase output must mature before it can be
 /// spent (protocol §6.5).
+///
+/// This constant holds the **mainnet** value. The effective maturity
+/// at runtime is network-dependent — use [`coinbase_maturity`] to get
+/// the value that applies to the currently-active network (testnet
+/// uses a lower value for faster development turnaround).
 pub const COINBASE_MATURITY: u64 = 100;
+
+/// Runtime coinbase maturity for the currently-active network.
+///
+/// Reads [`bitaiir_types::Network::active`] — defaults to mainnet
+/// (100 blocks) if the daemon has not explicitly selected a network.
+#[inline]
+pub fn coinbase_maturity() -> u64 {
+    bitaiir_types::Network::active().coinbase_maturity()
+}
 
 /// Recommended minimum confirmations before a wallet treats a
 /// received output as "confirmed".  This is a **client-side
