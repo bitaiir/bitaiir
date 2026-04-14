@@ -1147,21 +1147,20 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                             break;
                         }
 
-                        // Collect spent outpoints for storage.
-                        let spent: Vec<OutPoint> = block
-                            .transactions
-                            .iter()
-                            .skip(1)
-                            .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
-                            .collect();
-
                         state.chain.push(block.clone()).unwrap();
-                        for tx in &block.transactions {
-                            state.utxo.apply_transaction(tx, height).unwrap();
-                        }
+                        // Apply the block's transactions to the UTXO
+                        // set and capture the undo record in a
+                        // single pass; persist both atomically.
+                        let undo = match state.utxo.apply_block_with_undo(&block, height) {
+                            Ok(u) => u,
+                            Err(e) => {
+                                tracing::warn!("synced block {height} UTXO apply failed: {e}");
+                                break;
+                            }
+                        };
 
                         // Persist.
-                        if let Err(e) = self.storage.apply_block(height, &block, &spent) {
+                        if let Err(e) = self.storage.apply_block(height, &block, &undo) {
                             tracing::warn!("failed to persist synced block {height}: {e}");
                         }
 
@@ -1287,27 +1286,23 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                                         .unwrap()
                                         .as_secs();
                                     if let Ok(()) = bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200) {
-                                        let spent: Vec<OutPoint> = block.transactions.iter().skip(1)
-                                            .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
-                                            .collect();
                                         if s.chain.push(block.clone()).is_ok() {
-                                            for tx in &block.transactions {
-                                                let _ = s.utxo.apply_transaction(tx, height);
-                                            }
-                                            if let Some(storage) = gossip_storage.as_ref() {
-                                                let _ = storage.apply_block(height, &block, &spent);
-                                            }
-                                            // Remove confirmed txs from mempool.
-                                            for tx in block.transactions.iter().skip(1) {
-                                                s.mempool.remove(&tx.txid());
-                                            }
-                                            for p in &mut s.peers {
-                                                if p.addr == gossip_peer_key {
-                                                    p.best_height = p.best_height.max(height);
-                                                    break;
+                                            if let Ok(undo) = s.utxo.apply_block_with_undo(&block, height) {
+                                                if let Some(storage) = gossip_storage.as_ref() {
+                                                    let _ = storage.apply_block(height, &block, &undo);
                                                 }
+                                                // Remove confirmed txs from mempool.
+                                                for tx in block.transactions.iter().skip(1) {
+                                                    s.mempool.remove(&tx.txid());
+                                                }
+                                                for p in &mut s.peers {
+                                                    if p.addr == gossip_peer_key {
+                                                        p.best_height = p.best_height.max(height);
+                                                        break;
+                                                    }
+                                                }
+                                                tracing::info!("received block {height} from peer {peer_addr}");
                                             }
-                                            tracing::info!("received block {height} from peer {peer_addr}");
                                         }
                                     }
                                 }

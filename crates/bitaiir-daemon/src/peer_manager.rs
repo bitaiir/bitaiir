@@ -23,7 +23,7 @@ use bitaiir_net::message::NetMessage;
 use bitaiir_net::protocol;
 use bitaiir_rpc::{ConnectedPeer, KnownPeer, PeerDirection, PeerSource, SharedState};
 use bitaiir_storage::Storage;
-use bitaiir_types::{BlockHeader, Hash256, OutPoint, Transaction};
+use bitaiir_types::{BlockHeader, Hash256, Transaction};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -780,19 +780,21 @@ async fn try_apply_block(
     if bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200).is_err() {
         return false;
     }
-    let spent: Vec<OutPoint> = block
-        .transactions
-        .iter()
-        .skip(1)
-        .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
-        .collect();
     if s.chain.push(block.clone()).is_err() {
         return false;
     }
-    for tx in &block.transactions {
-        let _ = s.utxo.apply_transaction(tx, height);
-    }
-    let _ = storage.apply_block(height, &block, &spent);
+    // Apply to UTXO set and capture the undo record in a single
+    // pass, then persist block + undo atomically.  If UTXO apply
+    // somehow fails here the chain is already pushed, but validation
+    // above ensures this shouldn't happen for well-formed blocks.
+    let undo = match s.utxo.apply_block_with_undo(&block, height) {
+        Ok(u) => u,
+        Err(e) => {
+            warn!("UTXO apply failed after push, peer {peer_key}: {e}");
+            return false;
+        }
+    };
+    let _ = storage.apply_block(height, &block, &undo);
     for tx in block.transactions.iter().skip(1) {
         s.mempool.remove(&tx.txid());
     }

@@ -203,6 +203,7 @@ dependencies = [
  "bitaiir-crypto",
  "bitaiir-types",
  "primitive-types",
+ "serde",
  "thiserror 2.0.18",
 ]
 

@@ -24,7 +24,6 @@ use bitaiir_crypto::hash::hash160;
 use bitaiir_net::Peer;
 use bitaiir_rpc::{BitaiirApiServer, BitaiirRpcImpl, NodeState, SharedState, Wallet};
 use bitaiir_storage::Storage;
-use bitaiir_types::OutPoint;
 use clap::Parser;
 use jsonrpsee::server::ServerBuilder;
 use tokio::net::TcpListener;
@@ -327,13 +326,16 @@ async fn main() {
             }
 
             let mut utxo = UtxoSet::new();
-            for tx in &genesis.transactions {
-                utxo.apply_transaction(tx, 0).unwrap();
-            }
+            let genesis_undo = utxo
+                .apply_block_with_undo(&genesis, 0)
+                .expect("genesis applies cleanly");
 
-            // Persist genesis.
+            // Persist genesis.  The undo record is empty (the genesis
+            // coinbase has no previous input to restore) but we still
+            // write a BlockUndo entry so `load_block_undo` works
+            // uniformly for every stored block.
             storage
-                .apply_block(0, &genesis, &[])
+                .apply_block(0, &genesis, &genesis_undo)
                 .expect("persist genesis");
 
             // Generate a miner address in the wallet for block 1+.
@@ -674,22 +676,23 @@ async fn main() {
                     continue;
                 }
 
-                let spent: Vec<OutPoint> = block
-                    .transactions
-                    .iter()
-                    .skip(1)
-                    .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
-                    .collect();
-
                 if let Err(e) = s.chain.push(block.clone()) {
                     warn!("self-mined block failed push: {e}");
                     continue;
                 }
-                for tx in &block.transactions {
-                    s.utxo.apply_transaction(tx, next_height).unwrap();
-                }
+                // Apply the block's transactions to the UTXO set and
+                // capture the undo record in a single pass.  The
+                // undo record is then persisted atomically with the
+                // block so a future reorg can reverse this block.
+                let undo = match s.utxo.apply_block_with_undo(&block, next_height) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!("self-mined block UTXO apply failed: {e}");
+                        continue;
+                    }
+                };
 
-                if let Err(e) = mining_storage.apply_block(next_height, &block, &spent) {
+                if let Err(e) = mining_storage.apply_block(next_height, &block, &undo) {
                     warn!("failed to persist block {next_height}: {e}");
                 }
 
