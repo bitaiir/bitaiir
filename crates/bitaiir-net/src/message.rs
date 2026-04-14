@@ -200,8 +200,8 @@ impl NetMessage {
                     if offset + 4 > payload.len() {
                         return None;
                     }
-                    let len = u32::from_le_bytes(payload[offset..offset + 4].try_into().ok()?)
-                        as usize;
+                    let len =
+                        u32::from_le_bytes(payload[offset..offset + 4].try_into().ok()?) as usize;
                     offset += 4;
                     if offset + len > payload.len() {
                         return None;
