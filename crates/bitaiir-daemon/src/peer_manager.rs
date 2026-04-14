@@ -454,6 +454,14 @@ pub async fn run_gossip_loop(
     // header hash; lifetime is bounded by the peer connection.
     let mut pending_compact: HashMap<Hash256, PendingCompactBlock> = HashMap::new();
 
+    // Whether we've already retried `GetHeaders(0)` on this
+    // connection after an initial header-chain validation failure.
+    // A peer whose main chain diverged before our current tip can't
+    // answer `GetHeaders(our_height)` with a chain we can validate,
+    // so on first failure we ask again from genesis.  One retry per
+    // connection is enough; persistent invalidity means a bad peer.
+    let mut headers_retried_from_genesis: bool = false;
+
     loop {
         tokio::select! {
             // Outgoing broadcasts.
@@ -505,49 +513,89 @@ pub async fn run_gossip_loop(
                     }
                     Ok(Some(NetMessage::Headers(headers))) => {
                         // Validate the header chain cheaply:
-                        //   (1) each header's PoW meets its own
-                        //       `bits` target, and
-                        //   (2) `prev_block_hash` chains from our tip
-                        //       through the batch.
+                        //   (1) the first header's `prev_block_hash`
+                        //       is a block we already know (either
+                        //       our current tip, or an earlier block
+                        //       we have in the index),
+                        //   (2) every subsequent header chains from
+                        //       its predecessor in the batch, and
+                        //   (3) every header's PoW meets its own
+                        //       `bits` target.
                         // Full consensus (merkle root, tx validity,
                         // difficulty retarget) is re-run when the
                         // bodies arrive, so a malicious peer can at
                         // worst waste our time — not corrupt state.
-                        let our_tip = {
+                        //
+                        // If the first header's parent is unknown,
+                        // the peer's main chain likely diverged
+                        // before our current tip.  We retry once with
+                        // `GetHeaders(0)` to pull from genesis so we
+                        // can reconstruct the common ancestor's
+                        // side of the fork.
+                        let first_prev_known = if let Some(h) = headers.first() {
                             let s = state.read().await;
-                            s.chain.tip()
+                            s.chain.contains(&h.prev_block_hash)
+                        } else {
+                            false
                         };
-                        let mut expected_prev = our_tip;
-                        let mut all_ok = !headers.is_empty();
-                        for h in &headers {
-                            if h.prev_block_hash != expected_prev {
-                                all_ok = false;
-                                break;
+
+                        let mut all_ok = !headers.is_empty() && first_prev_known;
+                        if all_ok {
+                            let mut expected_prev = headers[0].prev_block_hash;
+                            for h in &headers {
+                                if h.prev_block_hash != expected_prev {
+                                    all_ok = false;
+                                    break;
+                                }
+                                let pow_hash = bitaiir_chain::aiir_pow(h);
+                                let target = bitaiir_chain::CompactTarget::from_bits(h.bits);
+                                if !target.hash_meets_target(pow_hash.as_bytes()) {
+                                    all_ok = false;
+                                    break;
+                                }
+                                expected_prev = h.block_hash();
                             }
-                            let pow_hash = bitaiir_chain::aiir_pow(h);
-                            let target = bitaiir_chain::CompactTarget::from_bits(h.bits);
-                            if !target.hash_meets_target(pow_hash.as_bytes()) {
-                                all_ok = false;
-                                break;
-                            }
-                            expected_prev = h.block_hash();
                         }
 
                         if all_ok {
-                            // Headers look good — request the bodies.
-                            let our_height = {
+                            // Determine a sensible start height for
+                            // the follow-up `GetBlocks`: the height
+                            // of the common ancestor on our main
+                            // chain (if any), otherwise 0.  Asking
+                            // from an earlier height than strictly
+                            // necessary is harmless — every block
+                            // we already have short-circuits as
+                            // `Duplicate` inside `accept_block`.
+                            let request_from = {
                                 let s = state.read().await;
-                                s.chain.height()
+                                s.chain
+                                    .height_of(&headers[0].prev_block_hash)
+                                    .unwrap_or(0)
                             };
-                            let m = NetMessage::GetBlocks(our_height);
+                            let m = NetMessage::GetBlocks(request_from);
                             let p = m.to_payload();
                             let f = protocol::frame_message(m.command(), &p);
                             if writer.write_all(&f).await.is_err() { break; }
                             let _ = writer.flush().await;
                             if let Some(ev) = &events {
                                 let _ = ev.send(format!(
-                                    "  {} headers validated from {peer_key}, fetching bodies",
+                                    "  {} headers validated from {peer_key}, fetching bodies from height {request_from}",
                                     headers.len(),
+                                ));
+                            }
+                        } else if !headers.is_empty() && !headers_retried_from_genesis {
+                            // First-parent unknown or chain broken.
+                            // Retry from genesis once — the peer may
+                            // have diverged earlier than our tip.
+                            headers_retried_from_genesis = true;
+                            let m = NetMessage::GetHeaders(0);
+                            let p = m.to_payload();
+                            let f = protocol::frame_message(m.command(), &p);
+                            if writer.write_all(&f).await.is_err() { break; }
+                            let _ = writer.flush().await;
+                            if let Some(ev) = &events {
+                                let _ = ev.send(format!(
+                                    "  peer {peer_key}: retrying header sync from genesis",
                                 ));
                             }
                         } else if !headers.is_empty() {
@@ -593,7 +641,10 @@ pub async fn run_gossip_loop(
                         if let Ok(block) = bitaiir_types::encoding::from_bytes::<
                             bitaiir_types::Block,
                         >(&bytes) {
-                            try_apply_block(block, &state, &storage, &peer_key).await;
+                            try_accept_and_apply_block(
+                                block, &state, &storage, &peer_key, &events,
+                            )
+                            .await;
                         }
                     }
                     Ok(Some(NetMessage::CompactBlock(cb))) => {
@@ -652,7 +703,10 @@ pub async fn run_gossip_loop(
                                     header: pending.header,
                                     transactions: txs,
                                 };
-                                let ok = try_apply_block(block, &state, &storage, &peer_key).await;
+                                let ok = try_accept_and_apply_block(
+                                    block, &state, &storage, &peer_key, &events,
+                                )
+                                .await;
                                 if ok {
                                     if let Some(ev) = &events {
                                         let _ = ev.send(format!(
@@ -758,53 +812,249 @@ fn unix_now() -> u64 {
 }
 
 // --------------------------------------------------------------------- //
-// Block application helper
+// Block acceptance + reorg orchestration
 // --------------------------------------------------------------------- //
 
-/// Validate a block against the current chain and, if it passes, push
-/// it onto the tip, apply its transactions to the UTXO set, persist it,
-/// drain its txs from the mempool, and bump the sending peer's
-/// recorded `best_height`.  Returns `true` on successful application.
+/// Accept a block from a peer, performing a reorg when its branch
+/// carries more cumulative work than the current main chain.
 ///
-/// Used by both the full-block path (`BlockData`) and the compact
-/// block path once reconstruction is complete.
-async fn try_apply_block(
+/// Flow:
+///
+/// 1. **Standalone validation** — cheap, block-only checks (PoW,
+///    size, merkle, coinbase structure, duplicate txs).  Rejects
+///    garbage before it can pollute the block index.
+/// 2. **Fork-choice decision** via [`bitaiir_chain::Chain::accept_block`],
+///    which returns one of four outcomes:
+///    - `Connected`: block extends the current tip.  Runs full
+///      stateful validation, applies to UTXO, persists.
+///    - `Reorg`: branch overtakes the main chain.  Undoes the
+///      old chain's UTXO state (re-inserting its txs into the
+///      mempool), rolls back `Chain.main_chain`, then validates
+///      and applies each block on the new branch one at a time.
+///    - `SideChain`: branch stored in the index but still has
+///      less-or-equal work — nothing else to do.
+///    - `Duplicate`: already-known block, no-op.
+///
+/// Returns `true` if the block (or the reorg it triggered) was
+/// successfully applied, `false` if it was rejected.
+async fn try_accept_and_apply_block(
     block: bitaiir_types::Block,
     state: &SharedState,
     storage: &Arc<Storage>,
     peer_key: &str,
+    events: &Option<std::sync::mpsc::Sender<String>>,
 ) -> bool {
+    // 1. Cheap standalone validation.
+    if let Err(e) = bitaiir_chain::validate_block_standalone(&block) {
+        warn!("peer {peer_key}: block failed standalone validation: {e}");
+        return false;
+    }
+
+    // 2. Branch on whether this block extends the tip: the
+    //    tip-extending case can run full stateful validation BEFORE
+    //    touching chain state, which lets us bail cleanly if the
+    //    block fails consensus.  Side-chain cases go through the
+    //    reorg orchestrator below.
     let mut s = state.write().await;
-    let height = s.chain.height() + 1;
     let now = unix_now();
-    if bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200).is_err() {
-        return false;
+    let current_tip = s.chain.tip();
+
+    if block.header.prev_block_hash == current_tip {
+        // Tip-extending path.  Validate fully first — cheaper to
+        // reject now than to unwind chain state later.
+        if let Err(e) = bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200) {
+            warn!("peer {peer_key}: tip-extending block failed validation: {e}");
+            return false;
+        }
+        let height = s.chain.height() + 1;
+        match s.chain.accept_block(block.clone()) {
+            Ok(bitaiir_chain::AcceptOutcome::Connected) => {}
+            Ok(other) => {
+                warn!("peer {peer_key}: unexpected outcome {other:?} for tip-extending block");
+                return false;
+            }
+            Err(e) => {
+                warn!("peer {peer_key}: chain rejected tip-extending block: {e}");
+                return false;
+            }
+        }
+        let undo = match s.utxo.apply_block_with_undo(&block, height) {
+            Ok(u) => u,
+            Err(e) => {
+                warn!("peer {peer_key}: UTXO apply failed: {e}");
+                return false;
+            }
+        };
+        let _ = storage.apply_block(height, &block, &undo);
+        for tx in block.transactions.iter().skip(1) {
+            s.mempool.remove(&tx.txid());
+        }
+        for p in &mut s.peers {
+            if p.addr == peer_key {
+                p.best_height = p.best_height.max(height);
+                break;
+            }
+        }
+        info!("received block {height} from peer {peer_key}");
+        return true;
     }
-    if s.chain.push(block.clone()).is_err() {
-        return false;
-    }
-    // Apply to UTXO set and capture the undo record in a single
-    // pass, then persist block + undo atomically.  If UTXO apply
-    // somehow fails here the chain is already pushed, but validation
-    // above ensures this shouldn't happen for well-formed blocks.
-    let undo = match s.utxo.apply_block_with_undo(&block, height) {
-        Ok(u) => u,
+
+    // Not tip-extending.  Feed the block to the chain and see if
+    // it causes a reorg.
+    let outcome = match s.chain.accept_block(block.clone()) {
+        Ok(o) => o,
         Err(e) => {
-            warn!("UTXO apply failed after push, peer {peer_key}: {e}");
+            warn!("peer {peer_key}: chain rejected side-chain block: {e}");
             return false;
         }
     };
-    let _ = storage.apply_block(height, &block, &undo);
-    for tx in block.transactions.iter().skip(1) {
-        s.mempool.remove(&tx.txid());
+
+    match outcome {
+        bitaiir_chain::AcceptOutcome::Duplicate => true,
+        bitaiir_chain::AcceptOutcome::SideChain => {
+            if let Some(ev) = events {
+                let _ = ev.send(format!(
+                    "  side-chain block from {peer_key} stored (no reorg)",
+                ));
+            }
+            true
+        }
+        bitaiir_chain::AcceptOutcome::Connected => {
+            // accept_block does not report Connected for
+            // non-tip-extending blocks, so this path is unreachable
+            // — but we handle it defensively rather than panicking.
+            warn!("peer {peer_key}: unexpected Connected outcome off-tip");
+            false
+        }
+        bitaiir_chain::AcceptOutcome::Reorg {
+            common_ancestor,
+            undone,
+            applied,
+        } => {
+            let ok = perform_reorg(
+                &mut s,
+                storage,
+                peer_key,
+                common_ancestor,
+                &undone,
+                &applied,
+            )
+            .await;
+            if ok {
+                if let Some(ev) = events {
+                    let _ = ev.send(format!(
+                        "  reorg from {peer_key}: undone {} block(s), applied {} block(s)",
+                        undone.len(),
+                        applied.len(),
+                    ));
+                }
+            }
+            ok
+        }
     }
+}
+
+/// Drive a reorg through the stateful layers: undo the old chain's
+/// UTXO effect, re-insert its txs into the mempool, roll back
+/// `Chain.main_chain`, then validate + apply + persist each block on
+/// the new branch.
+///
+/// On any failure mid-reorg the in-memory state is **not** currently
+/// rolled back to a consistent prior snapshot — this is a known
+/// limitation.  A well-behaved peer sending a valid branch will
+/// succeed; a peer sending a branch that fails validation at apply
+/// time will leave the node in a partial state that the next restart
+/// can recover from by reloading from storage.
+async fn perform_reorg(
+    s: &mut tokio::sync::RwLockWriteGuard<'_, bitaiir_rpc::NodeState>,
+    storage: &Arc<Storage>,
+    peer_key: &str,
+    common_ancestor: Hash256,
+    undone: &[Hash256],
+    applied: &[Hash256],
+) -> bool {
+    // 1. Undo each block on the old chain, in tip-first order.
+    for hash in undone {
+        let block = match s.chain.block(hash) {
+            Some(b) => b.clone(),
+            None => {
+                warn!("reorg: cannot load block {hash} to undo (peer {peer_key})");
+                return false;
+            }
+        };
+        let undo = match storage.load_block_undo(hash) {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                warn!("reorg: no undo record for block {hash} (peer {peer_key})");
+                return false;
+            }
+            Err(e) => {
+                warn!("reorg: load_block_undo({hash}) failed: {e}");
+                return false;
+            }
+        };
+        if let Err(e) = s.utxo.undo_block(&block, &undo) {
+            warn!("reorg: utxo.undo_block({hash}) failed: {e}");
+            return false;
+        }
+        // Non-coinbase txs go back to the mempool — they were valid
+        // at their original inclusion time and may still be valid
+        // against the post-reorg UTXO state.  If they turn out to
+        // be invalid (e.g. double-spent by a new-chain tx), mining
+        // will skip them at block-assembly time.
+        for tx in block.transactions.iter().skip(1) {
+            if !s.mempool.contains(&tx.txid()) {
+                s.mempool.add(tx.clone());
+            }
+        }
+    }
+
+    // 2. Walk `Chain.main_chain` back to the common ancestor.  From
+    //    here on, `chain.tip()` matches the parent expected by the
+    //    first block we're about to apply.
+    s.chain.rollback_main_chain_to(common_ancestor);
+
+    // 3. Apply each block on the new branch in order.
+    let now = unix_now();
+    for hash in applied {
+        let block = match s.chain.block(hash) {
+            Some(b) => b.clone(),
+            None => {
+                warn!("reorg: cannot load new-chain block {hash} (peer {peer_key})");
+                return false;
+            }
+        };
+        if let Err(e) = bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200) {
+            warn!("reorg: new-chain block {hash} failed validation: {e}");
+            return false;
+        }
+        let height = s.chain.height() + 1;
+        let undo = match s.utxo.apply_block_with_undo(&block, height) {
+            Ok(u) => u,
+            Err(e) => {
+                warn!("reorg: UTXO apply of {hash} failed: {e}");
+                return false;
+            }
+        };
+        if let Err(e) = s.chain.extend_main_chain(*hash) {
+            warn!("reorg: extend_main_chain({hash}) failed: {e}");
+            return false;
+        }
+        let _ = storage.apply_block(height, &block, &undo);
+        for tx in block.transactions.iter().skip(1) {
+            s.mempool.remove(&tx.txid());
+        }
+    }
+
+    // 4. Bump the peer's best_height to the new tip height.
+    let new_height = s.chain.height();
     for p in &mut s.peers {
         if p.addr == peer_key {
-            p.best_height = p.best_height.max(height);
+            p.best_height = p.best_height.max(new_height);
             break;
         }
     }
-    info!("received block {height} from peer {peer_key}");
+    info!("reorg complete: new tip height {new_height} (peer {peer_key})");
     true
 }
 
@@ -903,7 +1153,7 @@ async fn handle_compact_block(
             header: cb.header,
             transactions: txs,
         };
-        let ok = try_apply_block(block, state, storage, peer_key).await;
+        let ok = try_accept_and_apply_block(block, state, storage, peer_key, events).await;
         if ok {
             if let Some(ev) = events {
                 let _ = ev.send(format!(
