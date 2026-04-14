@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a new feature or improvement.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea!  For anything non-trivial, it's worth
+        agreeing on the approach here before writing code.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: |
+        Focus on the underlying need, not the implementation.
+        "It's hard to X" beats "add a Y flag".
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Other approaches you thought about and why this one won out.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: |
+        Links to related issues, screenshots, references to how other
+        projects solve this, etc.

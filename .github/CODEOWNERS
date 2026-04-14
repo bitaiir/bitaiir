@@ -1,0 +1,37 @@
+# CODEOWNERS for BitAiir.
+#
+# Each line matches paths to owners who are auto-requested for review
+# on any PR touching those paths.  Last matching pattern wins (unlike
+# .gitignore).
+#
+# Syntax: <path pattern>  <@user1> [@user2 ...] [@org/team]
+#
+# Review is routed to the `@bitaiir/maintainers` team.  The team must
+# exist in the `bitaiir` GitHub org for auto-review-request to work;
+# team mentions that point at a non-existent team are silently
+# ignored by GitHub.  Add contributors to the team as they come on.
+
+# Default — everything needs a maintainer's eyes.
+*                                   @bitaiir/maintainers
+
+# Consensus-critical: extra care.  Anything that can accept or reject a
+# block/transaction, anything that moves coins, anything cryptographic.
+/crates/bitaiir-chain/              @bitaiir/maintainers
+/crates/bitaiir-crypto/             @bitaiir/maintainers
+/crates/bitaiir-types/              @bitaiir/maintainers
+
+# Networking and wire protocol.
+/crates/bitaiir-net/                @bitaiir/maintainers
+
+# Storage layer — DB schema changes are migration-sensitive.
+/crates/bitaiir-storage/            @bitaiir/maintainers
+
+# Build, CI, release automation.
+/.github/                           @bitaiir/maintainers
+/Cargo.toml                         @bitaiir/maintainers
+/Cargo.lock                         @bitaiir/maintainers
+
+# Security disclosures and contribution rules — never silently.
+/SECURITY.md                        @bitaiir/maintainers
+/CONTRIBUTING.md                    @bitaiir/maintainers
+/CODEOWNERS                         @bitaiir/maintainers
