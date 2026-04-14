@@ -523,10 +523,19 @@ async fn main() {
                         }
 
                         // Delegate to the shared gossip loop which
-                        // handles blocks, txs, pings, AND addr gossip.
+                        // handles headers, blocks, txs, pings, AND
+                        // addr gossip.
                         let (reader, writer, _) = peer.into_parts();
+                        let peer_best_height = version.best_height;
                         peer_manager::run_gossip_loop(
-                            reader, writer, tx_recv, state, storage, events, addr_key,
+                            reader,
+                            writer,
+                            tx_recv,
+                            state,
+                            storage,
+                            events,
+                            addr_key,
+                            peer_best_height,
                         )
                         .await;
                     });

@@ -268,8 +268,19 @@ impl PeerManager {
         let storage = self.storage.clone();
         let events = self.events.clone();
         let addr_owned = addr.to_string();
+        let peer_best_height = their_version.best_height;
         tokio::spawn(async move {
-            run_gossip_loop(reader, writer, tx_recv, state, storage, events, addr_owned).await;
+            run_gossip_loop(
+                reader,
+                writer,
+                tx_recv,
+                state,
+                storage,
+                events,
+                addr_owned,
+                peer_best_height,
+            )
+            .await;
         });
     }
 
@@ -380,7 +391,13 @@ impl PeerManager {
 /// broadcasts (mined blocks, relayed transactions).  Used by both the
 /// PeerManager (outbound) and the inbound listener in `main.rs`.
 ///
-/// Handles: BlockData, TxData, GetBlocks, GetAddr, Addr, Ping/Pong.
+/// Handles: GetHeaders/Headers, GetBlocks/BlockData, TxData,
+/// GetAddr/Addr, Ping/Pong, SyncDone.
+///
+/// On startup the loop sends `GetAddr` (peer discovery) and, if the
+/// peer's advertised `best_height` is ahead of ours, `GetHeaders` to
+/// kick off a header-first sync.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_gossip_loop(
     mut reader: tokio::net::tcp::OwnedReadHalf,
     mut writer: tokio::net::tcp::OwnedWriteHalf,
@@ -389,6 +406,7 @@ pub async fn run_gossip_loop(
     storage: Arc<Storage>,
     events: Option<std::sync::mpsc::Sender<String>>,
     peer_key: String,
+    peer_best_height: u64,
 ) {
     // After connection, request known addresses from the peer.
     let getaddr_msg = NetMessage::GetAddr;
@@ -396,6 +414,24 @@ pub async fn run_gossip_loop(
     let frame = protocol::frame_message(getaddr_msg.command(), &payload);
     let _ = writer.write_all(&frame).await;
     let _ = writer.flush().await;
+
+    // Header-first sync kickoff.  If the peer claims a taller chain,
+    // ask for their headers starting right after our current tip.  We
+    // validate PoW on each incoming header before committing bandwidth
+    // to downloading the corresponding block bodies.
+    let our_height = state.read().await.chain.height();
+    if peer_best_height > our_height {
+        let m = NetMessage::GetHeaders(our_height);
+        let p = m.to_payload();
+        let f = protocol::frame_message(m.command(), &p);
+        let _ = writer.write_all(&f).await;
+        let _ = writer.flush().await;
+        if let Some(ev) = &events {
+            let _ = ev.send(format!(
+                "  requesting headers from {peer_key} ({our_height} → {peer_best_height})",
+            ));
+        }
+    }
 
     loop {
         tokio::select! {
@@ -425,6 +461,86 @@ pub async fn run_gossip_loop(
                 )
             } => {
                 match result {
+                    Ok(Some(NetMessage::GetHeaders(start_height))) => {
+                        // Serve a contiguous batch of headers starting
+                        // right after `start_height`, capped at
+                        // `MAX_HEADERS_PER_MESSAGE`.
+                        let headers: Vec<bitaiir_types::BlockHeader> = {
+                            let s = state.read().await;
+                            let tip = s.chain.height();
+                            let last = tip.min(
+                                start_height
+                                    + bitaiir_net::message::MAX_HEADERS_PER_MESSAGE as u64,
+                            );
+                            (start_height + 1..=last)
+                                .filter_map(|h| s.chain.header_at(h).copied())
+                                .collect()
+                        };
+                        let m = NetMessage::Headers(headers);
+                        let p = m.to_payload();
+                        let f = protocol::frame_message(m.command(), &p);
+                        if writer.write_all(&f).await.is_err() { break; }
+                        let _ = writer.flush().await;
+                    }
+                    Ok(Some(NetMessage::Headers(headers))) => {
+                        // Validate the header chain cheaply:
+                        //   (1) each header's PoW meets its own
+                        //       `bits` target, and
+                        //   (2) `prev_block_hash` chains from our tip
+                        //       through the batch.
+                        // Full consensus (merkle root, tx validity,
+                        // difficulty retarget) is re-run when the
+                        // bodies arrive, so a malicious peer can at
+                        // worst waste our time — not corrupt state.
+                        let our_tip = {
+                            let s = state.read().await;
+                            s.chain.tip()
+                        };
+                        let mut expected_prev = our_tip;
+                        let mut all_ok = !headers.is_empty();
+                        for h in &headers {
+                            if h.prev_block_hash != expected_prev {
+                                all_ok = false;
+                                break;
+                            }
+                            let pow_hash = bitaiir_chain::aiir_pow(h);
+                            let target = bitaiir_chain::CompactTarget::from_bits(h.bits);
+                            if !target.hash_meets_target(pow_hash.as_bytes()) {
+                                all_ok = false;
+                                break;
+                            }
+                            expected_prev = h.block_hash();
+                        }
+
+                        if all_ok {
+                            // Headers look good — request the bodies.
+                            let our_height = {
+                                let s = state.read().await;
+                                s.chain.height()
+                            };
+                            let m = NetMessage::GetBlocks(our_height);
+                            let p = m.to_payload();
+                            let f = protocol::frame_message(m.command(), &p);
+                            if writer.write_all(&f).await.is_err() { break; }
+                            let _ = writer.flush().await;
+                            if let Some(ev) = &events {
+                                let _ = ev.send(format!(
+                                    "  {} headers validated from {peer_key}, fetching bodies",
+                                    headers.len(),
+                                ));
+                            }
+                        } else if !headers.is_empty() {
+                            warn!(
+                                "peer {peer_key}: {} header(s) failed PoW/chain validation",
+                                headers.len(),
+                            );
+                            if let Some(ev) = &events {
+                                let _ = ev.send(format!(
+                                    "  peer {peer_key}: invalid header chain, ignoring",
+                                ));
+                            }
+                        }
+                    }
                     Ok(Some(NetMessage::GetBlocks(start_height))) => {
                         // Serve requested blocks.
                         let to_send: Vec<Vec<u8>> = {

@@ -4,6 +4,13 @@
 //! Payloads are simple binary: fixed-size fields in order. No bincode
 //! here — the wire format is hand-rolled for exact control.
 
+use bitaiir_types::{BlockHeader, encoding};
+
+/// Maximum number of block headers in a single `Headers` message.
+/// 2000 matches Bitcoin Core — enough to cover weeks of chain history
+/// in one round trip while keeping the payload under 200 KiB.
+pub const MAX_HEADERS_PER_MESSAGE: usize = 2000;
+
 /// A P2P network message.
 #[derive(Debug, Clone)]
 pub enum NetMessage {
@@ -15,7 +22,15 @@ pub enum NetMessage {
     Ping(u64),
     /// Keepalive response. Echoes the nonce from Ping.
     Pong(u64),
-    /// Request blocks from a given height onward.
+    /// Request block **headers** starting *after* the given height.
+    /// Used to cheaply validate a chain's proof of work before
+    /// committing bandwidth to downloading full block bodies.
+    GetHeaders(u64),
+    /// A batch of block headers (response to `GetHeaders`).  Capped
+    /// at [`MAX_HEADERS_PER_MESSAGE`]; peers request again with a
+    /// new `start` to continue.
+    Headers(Vec<BlockHeader>),
+    /// Request block **bodies** from a given height onward.
     GetBlocks(u64),
     /// A serialized block (canonical bincode bytes).
     BlockData(Vec<u8>),
@@ -67,6 +82,8 @@ impl NetMessage {
             NetMessage::Verack => "verack",
             NetMessage::Ping(_) => "ping",
             NetMessage::Pong(_) => "pong",
+            NetMessage::GetHeaders(_) => "getheaders",
+            NetMessage::Headers(_) => "headers",
             NetMessage::GetBlocks(_) => "getblocks",
             NetMessage::BlockData(_) => "block",
             NetMessage::SyncDone => "syncdone",
@@ -94,6 +111,22 @@ impl NetMessage {
             NetMessage::Verack => Vec::new(),
             NetMessage::Ping(nonce) => nonce.to_le_bytes().to_vec(),
             NetMessage::Pong(nonce) => nonce.to_le_bytes().to_vec(),
+            NetMessage::GetHeaders(start) => start.to_le_bytes().to_vec(),
+            NetMessage::Headers(headers) => {
+                // Wire format: count (u16 LE) || [len(u32 LE) || bytes] * count
+                // Each header is serialized with the canonical block
+                // encoding, so adding fields to `BlockHeader` stays
+                // wire-compatible at the framing level.
+                let count = headers.len().min(MAX_HEADERS_PER_MESSAGE) as u16;
+                let mut buf = Vec::new();
+                buf.extend_from_slice(&count.to_le_bytes());
+                for h in headers.iter().take(MAX_HEADERS_PER_MESSAGE) {
+                    let bytes = encoding::to_bytes(h).expect("header encodes");
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&bytes);
+                }
+                buf
+            }
             NetMessage::GetBlocks(start) => start.to_le_bytes().to_vec(),
             NetMessage::BlockData(bytes) => bytes.clone(),
             NetMessage::SyncDone => Vec::new(),
@@ -148,6 +181,37 @@ impl NetMessage {
             "pong" => {
                 let nonce = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
                 Some(NetMessage::Pong(nonce))
+            }
+            "getheaders" => {
+                let start = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
+                Some(NetMessage::GetHeaders(start))
+            }
+            "headers" => {
+                if payload.len() < 2 {
+                    return None;
+                }
+                let count = u16::from_le_bytes(payload[0..2].try_into().ok()?) as usize;
+                if count > MAX_HEADERS_PER_MESSAGE {
+                    return None;
+                }
+                let mut offset = 2;
+                let mut headers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if offset + 4 > payload.len() {
+                        return None;
+                    }
+                    let len = u32::from_le_bytes(payload[offset..offset + 4].try_into().ok()?)
+                        as usize;
+                    offset += 4;
+                    if offset + len > payload.len() {
+                        return None;
+                    }
+                    let header: BlockHeader =
+                        encoding::from_bytes(&payload[offset..offset + len]).ok()?;
+                    offset += len;
+                    headers.push(header);
+                }
+                Some(NetMessage::Headers(headers))
             }
             "getblocks" => {
                 let start = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
