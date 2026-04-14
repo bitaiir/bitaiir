@@ -26,3 +26,8 @@ thiserror = { workspace = true }
 # U256 for cumulative chain work — fork choice compares chains by
 # total proof-of-work accumulated, which needs 256-bit arithmetic.
 primitive-types = { workspace = true }
+
+# `BlockUndo` and `SpentInput` derive Serialize/Deserialize so they
+# can round-trip through the canonical bincode encoding used by
+# storage.
+serde = { workspace = true, features = ["derive"] }

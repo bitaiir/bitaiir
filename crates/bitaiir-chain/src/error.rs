@@ -28,6 +28,12 @@ pub enum Error {
     #[error("utxo set is missing the outpoint being spent: {0}")]
     MissingOutpoint(OutPoint),
 
+    /// `UtxoSet::undo_block` was called with a `BlockUndo` whose
+    /// `block_hash` does not match the block being undone.  This
+    /// indicates a caller-side pairing bug (wrong undo record).
+    #[error("undo record block hash {got} does not match block {expected}")]
+    UndoBlockHashMismatch { expected: Hash256, got: Hash256 },
+
     // --- Block validation errors (protocol §7.4) ------------------------- //
     /// Rule 1: serialized block size exceeds MAX_BLOCK_SIZE.
     #[error("block too large: {size} bytes (max {max})")]

@@ -15,6 +15,7 @@
 //! - `blocks`:         block_hash (32 bytes) → serialized Block
 //! - `height_to_hash`: height (u64 BE)       → block_hash (32 bytes)
 //! - `utxos`:          serialized OutPoint    → serialized TxOut
+//! - `block_undo`:     block_hash (32 bytes)  → serialized BlockUndo
 //! - `wallet_keys`:    address string         → privkey (32) + pubkey (33)
 //! - `metadata`:       key string             → value bytes
 
@@ -24,6 +25,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use bitaiir_chain::BlockUndo;
 use bitaiir_crypto::key::{PrivateKey, PublicKey};
 use bitaiir_types::{Block, Hash256, OutPoint, TxOut, encoding};
 use redb::{Database, ReadableTable, TableDefinition};
@@ -34,6 +36,7 @@ use thiserror::Error;
 const BLOCKS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blocks");
 const HEIGHT_TO_HASH: TableDefinition<u64, &[u8]> = TableDefinition::new("height_to_hash");
 const UTXOS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("utxos");
+const BLOCK_UNDO: TableDefinition<&[u8], &[u8]> = TableDefinition::new("block_undo");
 const WALLET_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wallet_keys");
 const KNOWN_PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("known_peers");
 const METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
@@ -122,19 +125,20 @@ impl Storage {
 
     // --- Block storage --------------------------------------------------- //
 
-    /// Persist a block and update the chain tip + UTXO set atomically.
+    /// Persist a block, its undo record, and the resulting UTXO + tip
+    /// updates — all in a single atomic redb transaction.
     ///
-    /// `spent_outpoints` is the list of outpoints consumed by the
-    /// block's non-coinbase transactions. These are removed from the
-    /// UTXO table while the block's new outputs are added.
-    pub fn apply_block(
-        &self,
-        height: u64,
-        block: &Block,
-        spent_outpoints: &[OutPoint],
-    ) -> Result<()> {
+    /// The `undo` record is produced by
+    /// [`bitaiir_chain::UtxoSet::apply_block_with_undo`] and is
+    /// persisted so a future reorg can reverse the block without
+    /// replaying the chain.  Callers MUST pass an `undo` whose
+    /// `block_hash` matches `block.block_hash()` — this invariant
+    /// isn't re-checked here (caller already built it from the same
+    /// block it's now persisting).
+    pub fn apply_block(&self, height: u64, block: &Block, undo: &BlockUndo) -> Result<()> {
         let block_hash = block.block_hash();
         let block_bytes = encoding::to_bytes(block).map_err(|e| Error::Encoding(e.to_string()))?;
+        let undo_bytes = encoding::to_bytes(undo).map_err(|e| Error::Encoding(e.to_string()))?;
 
         let write = self.db.begin_write()?;
         {
@@ -146,11 +150,15 @@ impl Storage {
             let mut heights = write.open_table(HEIGHT_TO_HASH)?;
             heights.insert(height, block_hash.as_bytes().as_slice())?;
 
-            // Remove spent UTXOs.
+            // Store the undo record under the block hash.
+            let mut undo_table = write.open_table(BLOCK_UNDO)?;
+            undo_table.insert(block_hash.as_bytes().as_slice(), undo_bytes.as_slice())?;
+
+            // Remove spent UTXOs (derived from the undo record).
             let mut utxos = write.open_table(UTXOS)?;
-            for outpoint in spent_outpoints {
-                let key =
-                    encoding::to_bytes(outpoint).map_err(|e| Error::Encoding(e.to_string()))?;
+            for spent in &undo.spent_inputs {
+                let key = encoding::to_bytes(&spent.outpoint)
+                    .map_err(|e| Error::Encoding(e.to_string()))?;
                 utxos.remove(key.as_slice())?;
             }
 
@@ -177,6 +185,29 @@ impl Storage {
         }
         write.commit()?;
         Ok(())
+    }
+
+    /// Load the undo record for a block, if one was persisted.
+    ///
+    /// Databases created before the `block_undo` table existed will
+    /// return `None` for their old blocks — the table is created on
+    /// first write, and old blocks never got an undo record.  A reorg
+    /// that tries to rewind past such a block will fail fast, which
+    /// is the right behaviour: deeper than N blocks we never stored
+    /// undo for, rewinding is not supported.
+    pub fn load_block_undo(&self, block_hash: &Hash256) -> Result<Option<BlockUndo>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BLOCK_UNDO) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let Some(bytes) = table.get(block_hash.as_bytes().as_slice())? else {
+            return Ok(None);
+        };
+        let undo: BlockUndo =
+            encoding::from_bytes(bytes.value()).map_err(|e| Error::Encoding(e.to_string()))?;
+        Ok(Some(undo))
     }
 
     // --- Chain loading --------------------------------------------------- //
