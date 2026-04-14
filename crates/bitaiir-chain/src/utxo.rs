@@ -75,6 +75,12 @@ pub struct BlockUndo {
 
 /// The set of all unspent transaction outputs, keyed by the
 /// `OutPoint` (previous txid + vout) that identifies them.
+///
+/// `UtxoSet` is `Clone` so the reorg orchestrator can take a
+/// cheap snapshot before mutating — if the reorg fails mid-way,
+/// the snapshot is assigned back in to restore consistent
+/// pre-reorg state.
+#[derive(Clone)]
 pub struct UtxoSet {
     utxos: HashMap<OutPoint, TxOut>,
     /// For coinbase outputs only: records the block height at which
