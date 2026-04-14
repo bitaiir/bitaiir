@@ -12,19 +12,35 @@
 //!   - Persisting the known-peer database to `bitaiir-storage` so it
 //!     survives restarts.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bitaiir_net::Peer;
+use bitaiir_net::compact::{self, BlockTxnMsg, CompactBlockMsg, GetBlockTxnMsg, ShortId};
 use bitaiir_net::message::NetMessage;
 use bitaiir_net::protocol;
 use bitaiir_rpc::{ConnectedPeer, KnownPeer, PeerDirection, PeerSource, SharedState};
 use bitaiir_storage::Storage;
-use bitaiir_types::OutPoint;
+use bitaiir_types::{BlockHeader, Hash256, OutPoint, Transaction};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+
+// --------------------------------------------------------------------- //
+// Compact-block reconstruction state
+// --------------------------------------------------------------------- //
+
+/// A compact block we've received but haven't yet fully reconstructed
+/// because some of its transactions weren't in our mempool.  We keep
+/// the header, the partially-filled slot array, and the absolute
+/// indexes we've asked the peer for via `GetBlockTxn`.
+struct PendingCompactBlock {
+    header: BlockHeader,
+    slots: Vec<Option<Transaction>>,
+    missing_indexes: Vec<u16>,
+}
 
 /// How often the manager wakes up to check connections and retry.
 const TICK_INTERVAL: Duration = Duration::from_secs(10);
@@ -433,6 +449,11 @@ pub async fn run_gossip_loop(
         }
     }
 
+    // Compact blocks we've received but not yet been able to fully
+    // reconstruct from our mempool.  Keyed by the compact block's
+    // header hash; lifetime is bounded by the peer connection.
+    let mut pending_compact: HashMap<Hash256, PendingCompactBlock> = HashMap::new();
+
     loop {
         tokio::select! {
             // Outgoing broadcasts.
@@ -572,34 +593,77 @@ pub async fn run_gossip_loop(
                         if let Ok(block) = bitaiir_types::encoding::from_bytes::<
                             bitaiir_types::Block,
                         >(&bytes) {
-                            let mut s = state.write().await;
-                            let height = s.chain.height() + 1;
-                            let now = unix_now();
-                            if bitaiir_chain::validate_block(
-                                &block, &s.chain, &s.utxo, now + 7200,
-                            )
-                            .is_ok()
+                            try_apply_block(block, &state, &storage, &peer_key).await;
+                        }
+                    }
+                    Ok(Some(NetMessage::CompactBlock(cb))) => {
+                        handle_compact_block(
+                            cb,
+                            &mut pending_compact,
+                            &state,
+                            &storage,
+                            &peer_key,
+                            &mut writer,
+                            &events,
+                        ).await;
+                    }
+                    Ok(Some(NetMessage::GetBlockTxn(req))) => {
+                        // Serve the requested transactions from our
+                        // copy of the block (chain lookup by hash).
+                        let txs: Vec<Transaction> = {
+                            let s = state.read().await;
+                            match s.chain.block(&req.block_hash) {
+                                Some(b) => req
+                                    .indexes
+                                    .iter()
+                                    .filter_map(|i| b.transactions.get(*i as usize).cloned())
+                                    .collect(),
+                                None => Vec::new(),
+                            }
+                        };
+                        if !txs.is_empty() {
+                            let m = NetMessage::BlockTxn(BlockTxnMsg {
+                                block_hash: req.block_hash,
+                                txs,
+                            });
+                            let p = m.to_payload();
+                            let f = protocol::frame_message(m.command(), &p);
+                            if writer.write_all(&f).await.is_err() { break; }
+                            let _ = writer.flush().await;
+                        }
+                    }
+                    Ok(Some(NetMessage::BlockTxn(resp))) => {
+                        if let Some(mut pending) = pending_compact.remove(&resp.block_hash) {
+                            let asked = pending.missing_indexes.len();
+                            // Fill the missing slots using the txs in
+                            // the order we asked for them.
+                            for (idx, tx) in pending.missing_indexes.iter().zip(resp.txs.into_iter())
                             {
-                                let spent: Vec<OutPoint> = block
-                                    .transactions.iter().skip(1)
-                                    .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
-                                    .collect();
-                                if s.chain.push(block.clone()).is_ok() {
-                                    for tx in &block.transactions {
-                                        let _ = s.utxo.apply_transaction(tx, height);
-                                    }
-                                    let _ = storage.apply_block(height, &block, &spent);
-                                    for tx in block.transactions.iter().skip(1) {
-                                        s.mempool.remove(&tx.txid());
-                                    }
-                                    for p in &mut s.peers {
-                                        if p.addr == peer_key {
-                                            p.best_height = p.best_height.max(height);
-                                            break;
-                                        }
-                                    }
-                                    info!("received block {height} from peer {peer_key}");
+                                if let Some(slot) = pending.slots.get_mut(*idx as usize) {
+                                    *slot = Some(tx);
                                 }
+                            }
+                            // If every slot is now filled, reconstruct
+                            // and apply.
+                            if pending.slots.iter().all(Option::is_some) {
+                                let txs: Vec<Transaction> =
+                                    pending.slots.into_iter().flatten().collect();
+                                let block = bitaiir_types::Block {
+                                    header: pending.header,
+                                    transactions: txs,
+                                };
+                                let ok = try_apply_block(block, &state, &storage, &peer_key).await;
+                                if ok {
+                                    if let Some(ev) = &events {
+                                        let _ = ev.send(format!(
+                                            "  compact block from {peer_key} reconstructed ({asked} tx via GetBlockTxn)",
+                                        ));
+                                    }
+                                }
+                            } else {
+                                warn!(
+                                    "peer {peer_key}: BlockTxn did not fill all missing slots",
+                                );
                             }
                         }
                     }
@@ -691,4 +755,185 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_secs()
+}
+
+// --------------------------------------------------------------------- //
+// Block application helper
+// --------------------------------------------------------------------- //
+
+/// Validate a block against the current chain and, if it passes, push
+/// it onto the tip, apply its transactions to the UTXO set, persist it,
+/// drain its txs from the mempool, and bump the sending peer's
+/// recorded `best_height`.  Returns `true` on successful application.
+///
+/// Used by both the full-block path (`BlockData`) and the compact
+/// block path once reconstruction is complete.
+async fn try_apply_block(
+    block: bitaiir_types::Block,
+    state: &SharedState,
+    storage: &Arc<Storage>,
+    peer_key: &str,
+) -> bool {
+    let mut s = state.write().await;
+    let height = s.chain.height() + 1;
+    let now = unix_now();
+    if bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200).is_err() {
+        return false;
+    }
+    let spent: Vec<OutPoint> = block
+        .transactions
+        .iter()
+        .skip(1)
+        .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
+        .collect();
+    if s.chain.push(block.clone()).is_err() {
+        return false;
+    }
+    for tx in &block.transactions {
+        let _ = s.utxo.apply_transaction(tx, height);
+    }
+    let _ = storage.apply_block(height, &block, &spent);
+    for tx in block.transactions.iter().skip(1) {
+        s.mempool.remove(&tx.txid());
+    }
+    for p in &mut s.peers {
+        if p.addr == peer_key {
+            p.best_height = p.best_height.max(height);
+            break;
+        }
+    }
+    info!("received block {height} from peer {peer_key}");
+    true
+}
+
+// --------------------------------------------------------------------- //
+// Compact block reception
+// --------------------------------------------------------------------- //
+
+/// Handle an incoming `CompactBlock`:
+///
+///   1. Validate the header's PoW and parent-hash linkage.
+///   2. Build a slot array of the block's total tx count.
+///   3. Prefill the slots listed in `cb.prefilled` (always includes
+///      the coinbase, which no peer has in its mempool).
+///   4. Compute SipHash short IDs for every mempool tx and fill any
+///      matching slots.
+///   5. If every slot is filled, reconstruct and apply the block.
+///   6. Otherwise, stash the partial block under `pending_compact`
+///      and request the missing txs via `GetBlockTxn`.
+#[allow(clippy::too_many_arguments)]
+async fn handle_compact_block(
+    cb: CompactBlockMsg,
+    pending_compact: &mut HashMap<Hash256, PendingCompactBlock>,
+    state: &SharedState,
+    storage: &Arc<Storage>,
+    peer_key: &str,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    events: &Option<std::sync::mpsc::Sender<String>>,
+) {
+    let block_hash = cb.header.block_hash();
+
+    // 1. Cheap header checks: PoW + parent linkage.
+    let pow_hash = bitaiir_chain::aiir_pow(&cb.header);
+    let target = bitaiir_chain::CompactTarget::from_bits(cb.header.bits);
+    if !target.hash_meets_target(pow_hash.as_bytes()) {
+        warn!("peer {peer_key}: compact block failed PoW");
+        return;
+    }
+    let our_tip = {
+        let s = state.read().await;
+        s.chain.tip()
+    };
+    if cb.header.prev_block_hash != our_tip {
+        // Not a direct extension of our tip — could be a block we
+        // already have, or a header ahead of us.  Either way, the
+        // header-first sync path will catch up via `GetHeaders`.
+        return;
+    }
+
+    // 2. Prepare the slot array.
+    let total_txs = cb.short_ids.len() + cb.prefilled.len();
+    if total_txs == 0 {
+        return;
+    }
+    let mut slots: Vec<Option<Transaction>> = (0..total_txs).map(|_| None).collect();
+    for (idx, tx) in &cb.prefilled {
+        if let Some(slot) = slots.get_mut(*idx as usize) {
+            *slot = Some(tx.clone());
+        }
+    }
+
+    // 3. Build a short-id → Transaction map from the mempool so we
+    //    can fill the non-prefilled slots in O(1) per lookup.
+    let sip_key = compact::derive_sip_key(&cb.header, cb.nonce_salt);
+    let mempool_by_sid: HashMap<ShortId, Transaction> = {
+        let s = state.read().await;
+        s.mempool
+            .iter()
+            .map(|(txid, tx)| (compact::short_id_for(txid, &sip_key), tx.clone()))
+            .collect()
+    };
+
+    // 4. Walk the short-ID list in block order, filling the remaining
+    //    slots from the mempool and collecting the indexes we can't
+    //    resolve locally.
+    let mut sid_iter = cb.short_ids.into_iter();
+    let mut missing_indexes: Vec<u16> = Vec::new();
+    for (i, slot) in slots.iter_mut().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let sid = match sid_iter.next() {
+            Some(s) => s,
+            None => break,
+        };
+        if let Some(tx) = mempool_by_sid.get(&sid) {
+            *slot = Some(tx.clone());
+        } else {
+            missing_indexes.push(i as u16);
+        }
+    }
+
+    // 5. If complete, reconstruct and apply right away.
+    if missing_indexes.is_empty() {
+        let txs: Vec<Transaction> = slots.into_iter().flatten().collect();
+        let block = bitaiir_types::Block {
+            header: cb.header,
+            transactions: txs,
+        };
+        let ok = try_apply_block(block, state, storage, peer_key).await;
+        if ok {
+            if let Some(ev) = events {
+                let _ = ev.send(format!(
+                    "  compact block from {peer_key} reconstructed fully from mempool",
+                ));
+            }
+        }
+        return;
+    }
+
+    // 6. Still missing some txs — ask the peer and stash the partial.
+    if let Some(ev) = events {
+        let _ = ev.send(format!(
+            "  compact block from {peer_key}: {} tx(s) missing, requesting",
+            missing_indexes.len(),
+        ));
+    }
+    let req = NetMessage::GetBlockTxn(GetBlockTxnMsg {
+        block_hash,
+        indexes: missing_indexes.clone(),
+    });
+    let p = req.to_payload();
+    let f = protocol::frame_message(req.command(), &p);
+    let _ = writer.write_all(&f).await;
+    let _ = writer.flush().await;
+
+    pending_compact.insert(
+        block_hash,
+        PendingCompactBlock {
+            header: cb.header,
+            slots,
+            missing_indexes,
+        },
+    );
 }

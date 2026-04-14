@@ -693,17 +693,32 @@ async fn main() {
                     warn!("failed to persist block {next_height}: {e}");
                 }
 
-                // Broadcast the new block to all connected peers, and
-                // optimistically bump their recorded `best_height` —
-                // we don't get an ack but in the common case they
-                // accept what we broadcast.
-                let block_bytes = bitaiir_types::encoding::to_bytes(&block).expect("block encodes");
+                // Broadcast the new block to all connected peers in
+                // **compact** form (BIP 152 style).  Peers reconstruct
+                // the full block from their mempool using the short
+                // IDs; any tx they're missing they'll request via
+                // `GetBlockTxn`.  Only the coinbase is prefilled — no
+                // peer has it in mempool.  On a warm mempool this
+                // shrinks new-block traffic from ~1 MB to tens of KiB.
+                let nonce_salt: u64 = rand::random();
+                let sip_key = bitaiir_net::compact::derive_sip_key(&block.header, nonce_salt);
+                let short_ids: Vec<bitaiir_net::ShortId> = block
+                    .transactions
+                    .iter()
+                    .skip(1) // coinbase is prefilled
+                    .map(|tx| bitaiir_net::compact::short_id_for(&tx.txid(), &sip_key))
+                    .collect();
+                let prefilled = vec![(0u16, block.transactions[0].clone())];
+                let compact_msg = bitaiir_net::message::NetMessage::CompactBlock(
+                    bitaiir_net::compact::CompactBlockMsg {
+                        header: block.header,
+                        nonce_salt,
+                        short_ids,
+                        prefilled,
+                    },
+                );
                 for peer in &mut s.peers {
-                    let _ = peer
-                        .sender
-                        .try_send(bitaiir_net::message::NetMessage::BlockData(
-                            block_bytes.clone(),
-                        ));
+                    let _ = peer.sender.try_send(compact_msg.clone());
                     peer.best_height = peer.best_height.max(next_height);
                 }
             }

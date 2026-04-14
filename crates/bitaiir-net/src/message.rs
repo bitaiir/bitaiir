@@ -4,7 +4,9 @@
 //! Payloads are simple binary: fixed-size fields in order. No bincode
 //! here — the wire format is hand-rolled for exact control.
 
-use bitaiir_types::{BlockHeader, encoding};
+use bitaiir_types::{BlockHeader, Hash256, Transaction, encoding};
+
+use crate::compact::{BlockTxnMsg, CompactBlockMsg, GetBlockTxnMsg, SHORT_ID_LEN, ShortId};
 
 /// Maximum number of block headers in a single `Headers` message.
 /// 2000 matches Bitcoin Core — enough to cover weeks of chain history
@@ -36,6 +38,16 @@ pub enum NetMessage {
     BlockData(Vec<u8>),
     /// Signals the end of a block sync stream.
     SyncDone,
+    /// A newly-mined block relayed in compact form (BIP 152 style).
+    /// Receivers reconstruct the full block from their mempool using
+    /// the short IDs; missing txs are requested with `GetBlockTxn`.
+    CompactBlock(CompactBlockMsg),
+    /// Request the missing transactions for a previously-received
+    /// compact block, identified by its block hash.
+    GetBlockTxn(GetBlockTxnMsg),
+    /// Reply to `GetBlockTxn`: the requested transactions, in the
+    /// same order as the requested indexes.
+    BlockTxn(BlockTxnMsg),
     /// A serialized transaction for mempool gossip.
     TxData(Vec<u8>),
     /// Request a list of known peer addresses.
@@ -87,6 +99,9 @@ impl NetMessage {
             NetMessage::GetBlocks(_) => "getblocks",
             NetMessage::BlockData(_) => "block",
             NetMessage::SyncDone => "syncdone",
+            NetMessage::CompactBlock(_) => "cmpctblock",
+            NetMessage::GetBlockTxn(_) => "getblocktxn",
+            NetMessage::BlockTxn(_) => "blocktxn",
             NetMessage::TxData(_) => "tx",
             NetMessage::GetAddr => "getaddr",
             NetMessage::Addr(_) => "addr",
@@ -130,6 +145,52 @@ impl NetMessage {
             NetMessage::GetBlocks(start) => start.to_le_bytes().to_vec(),
             NetMessage::BlockData(bytes) => bytes.clone(),
             NetMessage::SyncDone => Vec::new(),
+            NetMessage::CompactBlock(cb) => {
+                // Wire format:
+                //   header: [len(u32) || bytes]
+                //   nonce_salt: u64 LE
+                //   short_ids: [count(u16) || ShortId * count]
+                //   prefilled: [count(u16) || (u16 abs_index || u32 len || bytes) * count]
+                let mut buf = Vec::new();
+                let hdr = encoding::to_bytes(&cb.header).expect("header encodes");
+                buf.extend_from_slice(&(hdr.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&hdr);
+                buf.extend_from_slice(&cb.nonce_salt.to_le_bytes());
+                buf.extend_from_slice(&(cb.short_ids.len() as u16).to_le_bytes());
+                for sid in &cb.short_ids {
+                    buf.extend_from_slice(sid);
+                }
+                buf.extend_from_slice(&(cb.prefilled.len() as u16).to_le_bytes());
+                for (idx, tx) in &cb.prefilled {
+                    buf.extend_from_slice(&idx.to_le_bytes());
+                    let tx_bytes = encoding::to_bytes(tx).expect("tx encodes");
+                    buf.extend_from_slice(&(tx_bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&tx_bytes);
+                }
+                buf
+            }
+            NetMessage::GetBlockTxn(req) => {
+                // Wire format: block_hash(32) || count(u16) || indexes(u16) * count
+                let mut buf = Vec::new();
+                buf.extend_from_slice(req.block_hash.as_bytes());
+                buf.extend_from_slice(&(req.indexes.len() as u16).to_le_bytes());
+                for i in &req.indexes {
+                    buf.extend_from_slice(&i.to_le_bytes());
+                }
+                buf
+            }
+            NetMessage::BlockTxn(resp) => {
+                // Wire format: block_hash(32) || count(u16) || (u32 len || bytes) * count
+                let mut buf = Vec::new();
+                buf.extend_from_slice(resp.block_hash.as_bytes());
+                buf.extend_from_slice(&(resp.txs.len() as u16).to_le_bytes());
+                for tx in &resp.txs {
+                    let tx_bytes = encoding::to_bytes(tx).expect("tx encodes");
+                    buf.extend_from_slice(&(tx_bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&tx_bytes);
+                }
+                buf
+            }
             NetMessage::TxData(bytes) => bytes.clone(),
             NetMessage::GetAddr => Vec::new(),
             NetMessage::Addr(peers) => {
@@ -219,6 +280,120 @@ impl NetMessage {
             }
             "block" => Some(NetMessage::BlockData(payload.to_vec())),
             "syncdone" => Some(NetMessage::SyncDone),
+            "cmpctblock" => {
+                if payload.len() < 4 {
+                    return None;
+                }
+                let hdr_len = u32::from_le_bytes(payload[0..4].try_into().ok()?) as usize;
+                let mut offset = 4;
+                if offset + hdr_len > payload.len() {
+                    return None;
+                }
+                let header: BlockHeader =
+                    encoding::from_bytes(&payload[offset..offset + hdr_len]).ok()?;
+                offset += hdr_len;
+                if offset + 8 > payload.len() {
+                    return None;
+                }
+                let nonce_salt = u64::from_le_bytes(payload[offset..offset + 8].try_into().ok()?);
+                offset += 8;
+                if offset + 2 > payload.len() {
+                    return None;
+                }
+                let sid_count =
+                    u16::from_le_bytes(payload[offset..offset + 2].try_into().ok()?) as usize;
+                offset += 2;
+                if offset + sid_count * SHORT_ID_LEN > payload.len() {
+                    return None;
+                }
+                let mut short_ids = Vec::with_capacity(sid_count);
+                for _ in 0..sid_count {
+                    let mut sid: ShortId = [0u8; SHORT_ID_LEN];
+                    sid.copy_from_slice(&payload[offset..offset + SHORT_ID_LEN]);
+                    short_ids.push(sid);
+                    offset += SHORT_ID_LEN;
+                }
+                if offset + 2 > payload.len() {
+                    return None;
+                }
+                let pre_count =
+                    u16::from_le_bytes(payload[offset..offset + 2].try_into().ok()?) as usize;
+                offset += 2;
+                let mut prefilled = Vec::with_capacity(pre_count);
+                for _ in 0..pre_count {
+                    if offset + 6 > payload.len() {
+                        return None;
+                    }
+                    let idx = u16::from_le_bytes(payload[offset..offset + 2].try_into().ok()?);
+                    offset += 2;
+                    let tx_len =
+                        u32::from_le_bytes(payload[offset..offset + 4].try_into().ok()?) as usize;
+                    offset += 4;
+                    if offset + tx_len > payload.len() {
+                        return None;
+                    }
+                    let tx: Transaction =
+                        encoding::from_bytes(&payload[offset..offset + tx_len]).ok()?;
+                    offset += tx_len;
+                    prefilled.push((idx, tx));
+                }
+                Some(NetMessage::CompactBlock(CompactBlockMsg {
+                    header,
+                    nonce_salt,
+                    short_ids,
+                    prefilled,
+                }))
+            }
+            "getblocktxn" => {
+                if payload.len() < 34 {
+                    return None;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&payload[0..32]);
+                let block_hash = Hash256::from_bytes(h);
+                let count = u16::from_le_bytes(payload[32..34].try_into().ok()?) as usize;
+                let mut offset = 34;
+                if offset + count * 2 > payload.len() {
+                    return None;
+                }
+                let mut indexes = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let i = u16::from_le_bytes(payload[offset..offset + 2].try_into().ok()?);
+                    offset += 2;
+                    indexes.push(i);
+                }
+                Some(NetMessage::GetBlockTxn(GetBlockTxnMsg {
+                    block_hash,
+                    indexes,
+                }))
+            }
+            "blocktxn" => {
+                if payload.len() < 34 {
+                    return None;
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&payload[0..32]);
+                let block_hash = Hash256::from_bytes(h);
+                let count = u16::from_le_bytes(payload[32..34].try_into().ok()?) as usize;
+                let mut offset = 34;
+                let mut txs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if offset + 4 > payload.len() {
+                        return None;
+                    }
+                    let tx_len =
+                        u32::from_le_bytes(payload[offset..offset + 4].try_into().ok()?) as usize;
+                    offset += 4;
+                    if offset + tx_len > payload.len() {
+                        return None;
+                    }
+                    let tx: Transaction =
+                        encoding::from_bytes(&payload[offset..offset + tx_len]).ok()?;
+                    offset += tx_len;
+                    txs.push(tx);
+                }
+                Some(NetMessage::BlockTxn(BlockTxnMsg { block_hash, txs }))
+            }
             "tx" => Some(NetMessage::TxData(payload.to_vec())),
             "getaddr" => Some(NetMessage::GetAddr),
             "addr" => {

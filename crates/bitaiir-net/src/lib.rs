@@ -14,11 +14,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compact;
 pub mod error;
 pub mod message;
 pub mod peer;
 pub mod protocol;
 
+pub use compact::{BlockTxnMsg, CompactBlockMsg, GetBlockTxnMsg, ShortId};
 pub use error::{Error, Result};
 pub use message::{NetMessage, PeerAddr, VersionMessage};
 pub use peer::Peer;

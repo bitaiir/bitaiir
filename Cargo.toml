@@ -124,6 +124,9 @@ redb = "2"
 # Config file parsing.
 toml = "0.8"
 
+# SipHash-2-4 for compact-block short IDs (BIP 152 style).
+siphasher = "1"
+
 # Release profile: optimize hard, strip symbols, abort on panic for smaller
 # binaries. We override this for benchmarks if/when we add them.
 [profile.release]

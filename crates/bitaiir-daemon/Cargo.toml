@@ -27,6 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bitaiir-types = { workspace = true }
 jsonrpsee = { workspace = true }
+rand = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
