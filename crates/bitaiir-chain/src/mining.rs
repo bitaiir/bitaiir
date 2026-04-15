@@ -515,7 +515,7 @@ mod tests {
     fn mine_block_extends_chain() {
         let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000, "test genesis");
         let chain = Chain::with_genesis(genesis.clone());
-        let mut mempool = Mempool::new();
+        let mut mempool = Mempool::new(crate::consensus::DEFAULT_MAX_MEMPOOL_BYTES);
 
         let block = mine_block(&chain, &mut mempool, MINER_ADDR, 1_700_000_010);
 
@@ -537,7 +537,7 @@ mod tests {
         let genesis = create_test_genesis(MINER_ADDR, 1_700_000_000, "test genesis");
         let mut chain = Chain::with_genesis(genesis.clone());
         let mut utxo = UtxoSet::new();
-        let mut mempool = Mempool::new();
+        let mut mempool = Mempool::new(crate::consensus::DEFAULT_MAX_MEMPOOL_BYTES);
 
         // Apply genesis transactions to the UTXO set.
         for tx in &genesis.transactions {

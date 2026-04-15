@@ -12,6 +12,18 @@
 /// Maximum serialized block size in bytes (protocol §7.4 rule 1).
 pub const MAX_BLOCK_SIZE: usize = 1_000_000;
 
+/// Default upper bound on total serialized bytes held in the
+/// mempool.  When this cap is reached, the [`crate::Mempool`] evicts
+/// the lowest-priority transactions (highest tx-PoW hash, then
+/// newest arrival) to make room for incoming ones.
+///
+/// 50 MB is conservative for a pre-mainnet chain: it caps RAM
+/// exposure to a small fraction of any modern machine's memory
+/// while still holding tens of thousands of typical transactions.
+/// Operators can override this via the `[mempool] max_bytes` key
+/// in `bitaiir.toml`.
+pub const DEFAULT_MAX_MEMPOOL_BYTES: usize = 50_000_000;
+
 /// Maximum serialized transaction size in bytes (protocol §6.1).
 pub const MAX_TX_SIZE: usize = 100_000;
 

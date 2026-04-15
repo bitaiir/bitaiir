@@ -715,9 +715,33 @@ pub async fn run_gossip_loop(
                         >(&bytes) {
                             let txid = tx.txid();
                             let mut s = state.write().await;
-                            if !s.mempool.contains(&txid) {
-                                s.mempool.add(tx);
-                                info!("received tx {txid} from peer {peer_key}");
+                            if s.mempool.contains(&txid) {
+                                // Already in pool — peers often
+                                // re-broadcast a tx before a miner
+                                // picks it up.  Silent no-op.
+                            } else {
+                                // Validate before accepting: rejects
+                                // txs with invalid signatures, bad
+                                // tx-PoW nonce, missing inputs, or
+                                // attempted overspend.  Without this
+                                // guard any peer could fill our
+                                // mempool with arbitrary bytes.
+                                let next_height = s.chain.height() + 1;
+                                if let Err(e) = bitaiir_chain::validate_transaction(
+                                    &tx,
+                                    &s.utxo,
+                                    next_height,
+                                ) {
+                                    warn!(
+                                        "peer {peer_key}: rejected tx {txid}: {e}",
+                                    );
+                                } else if let Err(e) = s.mempool.add(tx) {
+                                    warn!(
+                                        "peer {peer_key}: mempool rejected tx {txid}: {e}",
+                                    );
+                                } else {
+                                    info!("received tx {txid} from peer {peer_key}");
+                                }
                             }
                         }
                     }
@@ -1006,9 +1030,11 @@ async fn perform_reorg(
             // be valid against the post-reorg UTXO state.  If they
             // turn out to be invalid (e.g. double-spent by a new-
             // chain tx), mining will skip them at block assembly.
+            // Mempool rejection here (size cap, etc.) is tolerated
+            // silently: re-inserting reorg txs is best-effort.
             for tx in block.transactions.iter().skip(1) {
                 if !s.mempool.contains(&tx.txid()) {
-                    s.mempool.add(tx.clone());
+                    let _ = s.mempool.add(tx.clone());
                 }
             }
             undone_persist.push((block, undo));

@@ -23,6 +23,8 @@ pub struct Config {
     pub mining: MiningConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub mempool: MempoolConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -43,6 +45,17 @@ pub struct MiningConfig {
 #[derive(Debug, Deserialize, Default)]
 pub struct StorageConfig {
     pub data_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct MempoolConfig {
+    /// Upper bound on total serialized bytes held in the mempool.
+    /// When reached, the lowest-priority transactions (highest
+    /// tx-PoW hash, newest arrival on ties) are evicted to make
+    /// room for incoming ones.  Defaults to
+    /// [`bitaiir_chain::consensus::DEFAULT_MAX_MEMPOOL_BYTES`]
+    /// (50 MB) when unset.
+    pub max_bytes: Option<usize>,
 }
 
 // -------------------------------------------------------------------------
@@ -70,6 +83,13 @@ pub fn default_data_dir() -> String {
     bitaiir_types::Network::active()
         .default_data_dir()
         .to_string()
+}
+
+/// Default mempool capacity in bytes — sourced from the chain
+/// crate so consensus and daemon agree on the same compile-time
+/// constant.
+pub fn default_max_mempool_bytes() -> usize {
+    bitaiir_chain::consensus::DEFAULT_MAX_MEMPOOL_BYTES
 }
 
 // -------------------------------------------------------------------------
@@ -113,6 +133,12 @@ pub fn write_default_config(path: &Path) {
 [storage]
 # data_dir = "bitaiir_data"          # mainnet default;
                                      # testnet is "bitaiir_testnet_data"
+
+[mempool]
+# max_bytes = 50000000               # 50 MB default.  Lower-priority
+                                     # txs (higher tx-PoW hash, later
+                                     # arrival) are evicted first when
+                                     # the pool is full.
 "#;
     let _ = std::fs::write(path, template);
 }

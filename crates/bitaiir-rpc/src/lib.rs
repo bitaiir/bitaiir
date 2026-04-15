@@ -835,7 +835,15 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         }
         let peers_notified = state.peers.len();
 
-        state.mempool.add(tx);
+        // Local mempool acceptance.  Reject cleanly if the size
+        // cap is hit rather than silently dropping the tx.
+        if let Err(e) = state.mempool.add(tx) {
+            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                -5,
+                format!("mempool rejected transaction: {e}"),
+                None::<()>,
+            ));
+        }
 
         Ok(serde_json::json!({
             "txid": txid.to_string(),
@@ -1023,6 +1031,8 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let state = self.state.read().await;
         Ok(serde_json::json!({
             "size": state.mempool.len(),
+            "total_bytes": state.mempool.total_bytes(),
+            "max_bytes": state.mempool.max_bytes(),
         }))
     }
 
@@ -1271,9 +1281,30 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                                 if let Ok(tx) = bitaiir_types::encoding::from_bytes::<bitaiir_types::Transaction>(&bytes) {
                                     let txid = tx.txid();
                                     let mut s = gossip_state.write().await;
-                                    if !s.mempool.contains(&txid) {
-                                        s.mempool.add(tx);
-                                        tracing::info!("received tx {txid} from peer {peer_addr}");
+                                    if s.mempool.contains(&txid) {
+                                        // Already in pool — silent no-op.
+                                    } else {
+                                        // Validate before accepting (same
+                                        // gate as `peer_manager`'s TxData
+                                        // handler — without it any peer
+                                        // can push arbitrary bytes into
+                                        // the mempool).
+                                        let next_height = s.chain.height() + 1;
+                                        if let Err(e) = bitaiir_chain::validate_transaction(
+                                            &tx,
+                                            &s.utxo,
+                                            next_height,
+                                        ) {
+                                            tracing::warn!(
+                                                "peer {peer_addr}: rejected tx {txid}: {e}",
+                                            );
+                                        } else if let Err(e) = s.mempool.add(tx) {
+                                            tracing::warn!(
+                                                "peer {peer_addr}: mempool rejected tx {txid}: {e}",
+                                            );
+                                        } else {
+                                            tracing::info!("received tx {txid} from peer {peer_addr}");
+                                        }
                                     }
                                 }
                             }
