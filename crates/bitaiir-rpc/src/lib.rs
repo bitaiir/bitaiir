@@ -756,7 +756,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             )
         };
 
-        // --- Phase 2: build + sign + mine PoW (NO lock) ----------------- //
+        // --- Phase 2: build + sign tx (NO lock) ------------------------- //
 
         // Build transaction outputs (recipient + change).
         let mut outputs = vec![TxOut {
@@ -794,65 +794,113 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             input.signature = sig.clone();
         }
 
-        // Mine the anti-spam PoW on the blocking thread pool so the
-        // Tokio reactor stays responsive while the CPU grinds.
-        let tx = tokio::task::spawn_blocking(move || {
-            bitaiir_chain::mine_tx_pow(&mut tx);
-            tx
-        })
-        .await
-        .map_err(|e| {
-            jsonrpsee::types::ErrorObjectOwned::owned(
-                -5,
-                format!("tx pow mining task failed: {e}"),
-                None::<()>,
-            )
-        })?;
+        // --- Phase 3: spawn background task for PoW + broadcast --------- //
+        //
+        // Mining the anti-spam PoW (~2 s on an idle CPU, much longer
+        // under heavy mining contention) used to block this handler,
+        // which meant the HTTP client could time out before the tx
+        // ever reached the mempool — the request got cancelled and
+        // the tx vanished without the user knowing.
+        //
+        // Now the handler returns immediately after the tx is built
+        // and signed.  A detached task finishes the job: mines PoW,
+        // re-validates (a block may have landed meanwhile), broadcasts
+        // to peers, adds to the local mempool.  Completion is
+        // announced through the TUI events channel so the operator
+        // sees either a success line or a warning in the log pane,
+        // and the tx outcome is also visible via `/getmempoolinfo`.
+        let bg_state = self.state.clone();
+        let bg_events = self.events.clone();
+        let bg_to_address = to_address.clone();
+        let bg_amount_atoms = amount_atoms;
+        tokio::spawn(async move {
+            // Mine tx-PoW on the blocking pool so the tokio reactor
+            // stays responsive while the CPU grinds.
+            let tx = match tokio::task::spawn_blocking(move || {
+                bitaiir_chain::mine_tx_pow(&mut tx);
+                tx
+            })
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("tx pow mining task failed: {e}");
+                    if let Some(ev) = &bg_events {
+                        let _ = ev.send(format!("  send_to_address: pow mining failed ({e})"));
+                    }
+                    return;
+                }
+            };
 
-        // --- Phase 3: re-validate + broadcast under WRITE lock ---------- //
+            let txid = tx.txid();
+            let mut s = bg_state.write().await;
 
-        let mut state = self.state.write().await;
+            // A block may have landed between phase 1 and here, so
+            // revalidate against the current UTXO before broadcasting.
+            let current_height = s.chain.height();
+            if let Err(e) = validate_transaction(&tx, &s.utxo, current_height) {
+                tracing::warn!("send_to_address: tx {txid} failed revalidation: {e}");
+                if let Some(ev) = &bg_events {
+                    let _ = ev.send(format!("  send_to_address: tx {txid} dropped ({e})",));
+                }
+                return;
+            }
 
-        // Re-validate: a block may have landed between phase 1 and
-        // here, so the UTXOs we picked might no longer exist.
-        let current_height = state.chain.height();
-        if let Err(e) = validate_transaction(&tx, &state.utxo, current_height) {
-            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
-                -4,
-                e.to_string(),
-                None::<()>,
-            ));
-        }
+            // Broadcast then add to local mempool.
+            let tx_bytes =
+                bitaiir_types::encoding::to_bytes(&tx).expect("Transaction always encodes");
+            let peers_notified = s.peers.len();
+            for peer in &s.peers {
+                let _ = peer
+                    .sender
+                    .try_send(bitaiir_net::NetMessage::TxData(tx_bytes.clone()));
+            }
 
-        let txid = tx.txid();
+            if let Err(e) = s.mempool.add(tx) {
+                tracing::warn!("send_to_address: mempool rejected {txid}: {e}");
+                if let Some(ev) = &bg_events {
+                    let _ = ev.send(format!(
+                        "  send_to_address: tx {txid} rejected by mempool ({e})",
+                    ));
+                }
+                return;
+            }
 
-        // Broadcast tx to all connected peers before adding to local mempool.
-        let tx_bytes = bitaiir_types::encoding::to_bytes(&tx).expect("Transaction always encodes");
-        for peer in &state.peers {
-            let _ = peer
-                .sender
-                .try_send(bitaiir_net::NetMessage::TxData(tx_bytes.clone()));
-        }
-        let peers_notified = state.peers.len();
+            tracing::info!(
+                "send_to_address: tx {txid} broadcast to {peers_notified} peer(s) and added to mempool",
+            );
+            if let Some(ev) = &bg_events {
+                // Mirror the JSON shape the TUI uses for synchronous
+                // RPC responses — each line of the pretty-printed
+                // object is pushed as its own log entry so it renders
+                // as an indented block in the TUI's log pane.
+                let completion = serde_json::json!({
+                    "event": "send_to_address_completed",
+                    "txid": txid.to_string(),
+                    "to": bg_to_address,
+                    "amount": format!("{}", Amount::from_atomic(bg_amount_atoms)),
+                    "peers_notified": peers_notified,
+                    "status": "broadcast and added to mempool",
+                });
+                if let Ok(pretty) = serde_json::to_string_pretty(&completion) {
+                    for line in pretty.lines() {
+                        let _ = ev.send(format!("  {line}"));
+                    }
+                }
+            }
+        });
 
-        // Local mempool acceptance.  Reject cleanly if the size
-        // cap is hit rather than silently dropping the tx.
-        if let Err(e) = state.mempool.add(tx) {
-            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
-                -5,
-                format!("mempool rejected transaction: {e}"),
-                None::<()>,
-            ));
-        }
-
+        // Respond immediately — the caller sees "accepted" in well
+        // under 100 ms and can poll `/getmempoolinfo` or watch the
+        // TUI log for completion.
+        let peers_notified = self.state.read().await.peers.len();
         Ok(serde_json::json!({
-            "txid": txid.to_string(),
             "from": from_address,
             "to": to_address,
             "amount": format!("{}", Amount::from_atomic(amount_atoms)),
             "change": format!("{}", Amount::from_atomic(change)),
             "peers_notified": peers_notified,
-            "status": "added to mempool",
+            "status": "accepted for mining (tx-pow + broadcast happen in background)",
         }))
     }
 
