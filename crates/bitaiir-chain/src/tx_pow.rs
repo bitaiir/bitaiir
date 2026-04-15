@@ -7,7 +7,7 @@
 //! uneconomical without charging honest users money.
 
 use bitaiir_crypto::hash::double_sha256;
-use bitaiir_types::{Transaction, encoding};
+use bitaiir_types::{Hash256, Transaction, encoding};
 
 /// Number of leading zero bytes required in the tx PoW hash.
 /// Production: 3 bytes (1 in 16.7M, ~1.7s at 10M hash/s).
@@ -58,12 +58,33 @@ pub fn validate_tx_pow(tx: &Transaction) -> bool {
         return true;
     }
 
+    let hash = tx_pow_hash(tx);
+    meets_target(hash.as_bytes())
+}
+
+/// Compute the tx-level anti-spam PoW hash as a `Hash256`.
+///
+/// This is `double_sha256(tx_digest || pow_nonce_le)` — the same
+/// hash `validate_tx_pow` checks against the minimum target.  It's
+/// exposed publicly so the mempool can use the numeric value as a
+/// priority key: a lower hash means more leading zero bytes, which
+/// means the sender spent more CPU time mining the nonce.
+///
+/// Mining voluntarily beyond the minimum target produces a lower
+/// hash, which naturally sorts above less-worked transactions
+/// without any protocol change — the priority order falls out of
+/// the hash values themselves.
+///
+/// For coinbase transactions (exempt from tx-PoW) the hash is
+/// still well-defined — callers that care about coinbase-vs-
+/// non-coinbase semantics must check [`Transaction::is_coinbase`]
+/// separately.
+pub fn tx_pow_hash(tx: &Transaction) -> Hash256 {
     let digest = tx_digest(tx);
     let mut data = [0u8; 40];
     data[..32].copy_from_slice(&digest);
     data[32..].copy_from_slice(&tx.pow_nonce.to_le_bytes());
-    let hash = double_sha256(&data);
-    meets_target(&hash)
+    Hash256::from_bytes(double_sha256(&data))
 }
 
 #[cfg(test)]

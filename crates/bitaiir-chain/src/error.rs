@@ -37,6 +37,20 @@ pub enum Error {
     #[error("chain traversal from {tip} failed at {at}: missing parent link")]
     BrokenChainLink { tip: Hash256, at: Hash256 },
 
+    // --- Mempool errors -------------------------------------------------- //
+    /// The mempool is at capacity and the incoming transaction has
+    /// lower priority (higher tx-PoW hash, later arrival on ties)
+    /// than every transaction currently held, so it's rejected
+    /// without evicting anything.
+    #[error("mempool is full and incoming tx has lower priority than existing ones")]
+    MempoolFull,
+
+    /// The incoming transaction's serialized size alone exceeds the
+    /// mempool's configured capacity.  No amount of eviction can
+    /// make room for it.
+    #[error("transaction size {size} exceeds mempool capacity {max}")]
+    TxTooLargeForMempool { size: usize, max: usize },
+
     // --- UTXO set errors ------------------------------------------------- //
     /// A transaction tried to spend an outpoint not in the UTXO set.
     #[error("utxo set is missing the outpoint being spent: {0}")]

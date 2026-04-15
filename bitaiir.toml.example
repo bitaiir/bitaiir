@@ -39,3 +39,12 @@
 # Directory for chain database, wallet keys, and peer data.
 # Default: mainnet = "bitaiir_data", testnet = "bitaiir_testnet_data".
 # data_dir = "bitaiir_data"
+
+[mempool]
+# Maximum total serialized bytes held in the mempool before
+# eviction kicks in.  When a new transaction arrives and the pool
+# is at capacity, the lowest-priority transaction (highest tx-PoW
+# hash, then newest arrival on ties) is evicted to make room.  If
+# the incoming transaction itself would be the lowest-priority,
+# it is rejected instead.  Default: 50 MB (50000000 bytes).
+# max_bytes = 50000000

@@ -78,6 +78,7 @@ struct Settings {
     interactive: bool,
     connect: Vec<String>,
     mining_threads: usize,
+    max_mempool_bytes: usize,
 }
 
 impl Settings {
@@ -116,6 +117,11 @@ impl Settings {
 
         let mining_threads = args.mining_threads.or(cfg.mining.threads).unwrap_or(0);
 
+        let max_mempool_bytes = cfg
+            .mempool
+            .max_bytes
+            .unwrap_or_else(config::default_max_mempool_bytes);
+
         Self {
             rpc_addr,
             p2p_addr,
@@ -124,6 +130,7 @@ impl Settings {
             interactive,
             connect,
             mining_threads,
+            max_mempool_bytes,
         }
     }
 }
@@ -410,7 +417,7 @@ async fn main() {
     let state: SharedState = Arc::new(RwLock::new(NodeState {
         chain,
         utxo,
-        mempool: Mempool::new(),
+        mempool: Mempool::new(args.max_mempool_bytes),
         wallet,
         peers: Vec::new(),
         known_peers,
