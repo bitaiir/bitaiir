@@ -178,6 +178,41 @@ impl Chain {
             .map(|i| i as u64)
     }
 
+    /// Build a block locator — the list of hashes a peer should
+    /// send with a `GetHeaders` request so the remote side can find
+    /// the deepest common ancestor in one round trip.
+    ///
+    /// The locator is ordered newest-first: the first entry is our
+    /// tip, then tip-1, tip-2, tip-3, ... tip-10, then the spacing
+    /// doubles each step (tip-12, tip-16, tip-24, tip-40, ...) until
+    /// the genesis is included.  A 2-million-block chain is covered
+    /// by ~32 entries, so a single locator is ~1 KiB on the wire but
+    /// lets peers efficiently recognise a common ancestor at any
+    /// depth.
+    ///
+    /// Matches Bitcoin Core's `CBlockLocator::Build`: first 10
+    /// entries at step 1, then step doubles after each subsequent
+    /// entry, always terminates at the genesis block.
+    pub fn build_locator(&self) -> Vec<Hash256> {
+        let mut locator = Vec::new();
+        let tip_height = (self.main_chain.len() - 1) as u64;
+        let mut height = tip_height;
+        let mut step: u64 = 1;
+        loop {
+            if let Some(h) = self.main_chain.get(height as usize) {
+                locator.push(*h);
+            }
+            if height == 0 {
+                break;
+            }
+            height = height.saturating_sub(step);
+            if locator.len() > 10 {
+                step = step.saturating_mul(2);
+            }
+        }
+        locator
+    }
+
     /// Take a cheap snapshot of the current main-chain hash list.
     /// Paired with [`Self::restore_main_chain`], this lets the reorg
     /// orchestrator save the pre-reorg main chain before mutating
@@ -819,6 +854,111 @@ mod tests {
         // longer on the main chain).
         assert!(chain.contains(&block_a_hash));
         assert!(chain.contains(&block_b_hash));
+    }
+
+    // --- build_locator tests -------------------------------------------- //
+
+    /// Chain with only a genesis block — locator is just `[genesis]`.
+    #[test]
+    fn build_locator_on_genesis_only_chain_returns_one_entry() {
+        let genesis = sample_block(Hash256::ZERO, 0);
+        let genesis_hash = genesis.block_hash();
+        let chain = Chain::with_genesis(genesis);
+
+        let locator = chain.build_locator();
+        assert_eq!(locator, vec![genesis_hash]);
+    }
+
+    /// Chain shorter than 10 blocks — every height is in the locator,
+    /// step is always 1, newest-first.
+    #[test]
+    fn build_locator_on_short_chain_is_a_linear_walk() {
+        let genesis = sample_block(Hash256::ZERO, 0);
+        let genesis_hash = genesis.block_hash();
+        let mut chain = Chain::with_genesis(genesis);
+
+        let mut prev = genesis_hash;
+        let mut hashes = vec![genesis_hash];
+        for i in 1u64..=5 {
+            let b = sample_block(prev, i);
+            prev = b.block_hash();
+            hashes.push(prev);
+            chain.push(b).unwrap();
+        }
+        // hashes is [genesis, b1, b2, b3, b4, b5].
+
+        let locator = chain.build_locator();
+        // Locator walks newest-first, covering every height since
+        // we never pass the 10-entry threshold where step doubles.
+        let expected: Vec<_> = hashes.iter().rev().copied().collect();
+        assert_eq!(locator, expected);
+        // Locator always ends at genesis.
+        assert_eq!(*locator.last().unwrap(), genesis_hash);
+    }
+
+    /// Chain of 50 blocks: first 11 entries step by 1, subsequent
+    /// entries step by doubling powers of 2, always terminates at
+    /// genesis.  This checks both the doubling transition and the
+    /// termination condition.
+    #[test]
+    fn build_locator_on_long_chain_has_exponential_spacing() {
+        let genesis = sample_block(Hash256::ZERO, 0);
+        let genesis_hash = genesis.block_hash();
+        let mut chain = Chain::with_genesis(genesis);
+
+        let mut prev = genesis_hash;
+        let mut hashes = vec![genesis_hash];
+        for i in 1u64..=50 {
+            let b = sample_block(prev, i);
+            prev = b.block_hash();
+            hashes.push(prev);
+            chain.push(b).unwrap();
+        }
+
+        let locator = chain.build_locator();
+
+        // First 11 entries should be consecutive heights (50, 49, 48, ..., 40).
+        for (i, hash) in locator.iter().take(11).enumerate() {
+            let expected_height = 50 - i;
+            assert_eq!(
+                *hash, hashes[expected_height],
+                "locator[{i}] should be height {expected_height}",
+            );
+        }
+
+        // After entry 11 the step starts doubling: 40 → 38 → 34 → 26
+        // → 10 → genesis(0).
+        //
+        // Trace (matches the loop in build_locator):
+        //   entry 11 at height 40, step stays 1 after this push
+        //     (the update happens *after* the next index move).
+        //   After the push, height -= 1 → 39; len=11 > 10 so step *= 2 → 2.
+        //   push height=39? No — wait, at entry 11 we pushed height 40.
+        //   Then height = 40 - 1 = 39. But step was still 1 before the
+        //   size check.
+        //
+        // Re-reading build_locator:
+        //   push h=40 (entry 11); h=0? no; h -= 1 → 39; len=11 > 10 → step=2
+        //   push h=39 (entry 12); h-=2 → 37; len=12 > 10 → step=4
+        //   push h=37 (entry 13); h-=4 → 33; step=8
+        //   push h=33 (entry 14); h-=8 → 25; step=16
+        //   push h=25 (entry 15); h-=16 → 9; step=32
+        //   push h=9  (entry 16); h-=32 saturates → 0; step=64
+        //   push h=0  (entry 17); h=0 break
+        //
+        // So the tail is [39, 37, 33, 25, 9, 0].
+        let tail_heights = [39usize, 37, 33, 25, 9, 0];
+        for (offset, expected_h) in tail_heights.iter().enumerate() {
+            let i = 11 + offset;
+            assert_eq!(
+                locator[i], hashes[*expected_h],
+                "locator[{i}] should be height {expected_h}",
+            );
+        }
+
+        // Total length is 17 entries and genesis is the last.
+        assert_eq!(locator.len(), 17);
+        assert_eq!(*locator.last().unwrap(), genesis_hash);
     }
 
     #[test]

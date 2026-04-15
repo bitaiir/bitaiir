@@ -13,6 +13,12 @@ use crate::compact::{BlockTxnMsg, CompactBlockMsg, GetBlockTxnMsg, SHORT_ID_LEN,
 /// in one round trip while keeping the payload under 200 KiB.
 pub const MAX_HEADERS_PER_MESSAGE: usize = 2000;
 
+/// Maximum number of hashes a peer may include in a `GetHeaders`
+/// block locator.  A 64-entry cap covers any practical chain
+/// (2^64 blocks) with the doubling-step algorithm, so a locator
+/// larger than this is either buggy or adversarial.
+pub const MAX_LOCATOR_ENTRIES: usize = 64;
+
 /// A P2P network message.
 #[derive(Debug, Clone)]
 pub enum NetMessage {
@@ -24,10 +30,17 @@ pub enum NetMessage {
     Ping(u64),
     /// Keepalive response. Echoes the nonce from Ping.
     Pong(u64),
-    /// Request block **headers** starting *after* the given height.
-    /// Used to cheaply validate a chain's proof of work before
-    /// committing bandwidth to downloading full block bodies.
-    GetHeaders(u64),
+    /// Request block **headers** using a block locator — a list
+    /// of hashes ordered newest-first, exponentially spaced, that
+    /// terminates at the genesis.  The receiver walks the locator
+    /// until it finds a hash on its own main chain; that's the
+    /// deepest common ancestor, and it responds with headers from
+    /// that point forward.  One round trip finds the fork point
+    /// regardless of how deep the divergence is.
+    ///
+    /// See [`bitaiir_types::Hash256`] for the hash type and
+    /// [`MAX_LOCATOR_ENTRIES`] for the cap.
+    GetHeaders(Vec<bitaiir_types::Hash256>),
     /// A batch of block headers (response to `GetHeaders`).  Capped
     /// at [`MAX_HEADERS_PER_MESSAGE`]; peers request again with a
     /// new `start` to continue.
@@ -126,7 +139,16 @@ impl NetMessage {
             NetMessage::Verack => Vec::new(),
             NetMessage::Ping(nonce) => nonce.to_le_bytes().to_vec(),
             NetMessage::Pong(nonce) => nonce.to_le_bytes().to_vec(),
-            NetMessage::GetHeaders(start) => start.to_le_bytes().to_vec(),
+            NetMessage::GetHeaders(locator) => {
+                // Wire format: count(u16 LE) || [32-byte hash] * count.
+                let count = locator.len().min(MAX_LOCATOR_ENTRIES) as u16;
+                let mut buf = Vec::with_capacity(2 + count as usize * 32);
+                buf.extend_from_slice(&count.to_le_bytes());
+                for h in locator.iter().take(MAX_LOCATOR_ENTRIES) {
+                    buf.extend_from_slice(h.as_bytes());
+                }
+                buf
+            }
             NetMessage::Headers(headers) => {
                 // Wire format: count (u16 LE) || [len(u32 LE) || bytes] * count
                 // Each header is serialized with the canonical block
@@ -244,8 +266,24 @@ impl NetMessage {
                 Some(NetMessage::Pong(nonce))
             }
             "getheaders" => {
-                let start = u64::from_le_bytes(payload.get(..8)?.try_into().ok()?);
-                Some(NetMessage::GetHeaders(start))
+                if payload.len() < 2 {
+                    return None;
+                }
+                let count = u16::from_le_bytes(payload[0..2].try_into().ok()?) as usize;
+                if count > MAX_LOCATOR_ENTRIES {
+                    return None;
+                }
+                if payload.len() < 2 + count * 32 {
+                    return None;
+                }
+                let mut locator = Vec::with_capacity(count);
+                for i in 0..count {
+                    let offset = 2 + i * 32;
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(&payload[offset..offset + 32]);
+                    locator.push(bitaiir_types::Hash256::from_bytes(bytes));
+                }
+                Some(NetMessage::GetHeaders(locator))
             }
             "headers" => {
                 if payload.len() < 2 {
