@@ -967,11 +967,10 @@ async fn try_accept_and_apply_block(
 /// node returns to exactly its pre-reorg state.
 ///
 /// Storage persistence only happens **after** every in-memory step
-/// has succeeded.  Persistence is still block-by-block (one redb
-/// write transaction per block) so a disk error partway through
-/// leaves storage inconsistent with the successful in-memory state
-/// — but this is recoverable on restart (peers will re-sync) and
-/// is much rarer than a validation failure.
+/// has succeeded, and is itself a single atomic redb write
+/// transaction via [`Storage::apply_reorg`].  End-to-end the reorg
+/// either fully commits (memory + disk both post-reorg) or fully
+/// rolls back (memory restored from snapshot, disk untouched).
 async fn perform_reorg(
     s: &mut tokio::sync::RwLockWriteGuard<'_, bitaiir_rpc::NodeState>,
     storage: &Arc<Storage>,
@@ -980,20 +979,26 @@ async fn perform_reorg(
     undone: &[Hash256],
     applied: &[Hash256],
 ) -> bool {
-    // Snapshot the mutable in-memory state.  Rollback is just three
-    // assignments — cheap, and keeps the failure path trivially
-    // correct regardless of which step failed.
+    // Snapshot the mutable in-memory state.  Rollback on failure is
+    // just three assignments — cheap, and keeps the failure path
+    // trivially correct regardless of which step failed.
     let utxo_snapshot = s.utxo.clone();
     let main_chain_snapshot = s.chain.main_chain_snapshot();
     let mempool_snapshot = s.mempool.clone();
+    let old_tip_height = s.chain.height();
 
     // Run the whole reorg in memory first.  Each step returns
     // `Err(msg)` on failure; the outer match restores state from
-    // snapshots before returning.
-    let applied_persist: Result<
-        Vec<(u64, bitaiir_types::Block, bitaiir_chain::BlockUndo)>,
-        String,
-    > = (|| {
+    // snapshots before returning.  We also collect the paired
+    // `(block, undo)` records for both the undone and the applied
+    // chains so the single-transaction `Storage::apply_reorg` call
+    // at the end has everything it needs.
+    type UndonePersist = Vec<(bitaiir_types::Block, bitaiir_chain::BlockUndo)>;
+    type AppliedPersist = Vec<(u64, bitaiir_types::Block, bitaiir_chain::BlockUndo)>;
+    let persist: Result<(UndonePersist, AppliedPersist), String> = (|| {
+        let mut undone_persist: UndonePersist = Vec::with_capacity(undone.len());
+        let mut applied_persist: AppliedPersist = Vec::with_capacity(applied.len());
+
         // 1. Undo each block on the old chain, in tip-first order.
         for hash in undone {
             let block = s
@@ -1010,15 +1015,15 @@ async fn perform_reorg(
                 .map_err(|e| format!("utxo.undo_block({hash}) failed: {e}"))?;
             // Non-coinbase txs go back to the mempool — they were
             // valid at their original inclusion time and may still
-            // be valid against the post-reorg UTXO state.  If
-            // they turn out to be invalid (e.g. double-spent by a
-            // new-chain tx), mining will skip them at block
-            // assembly time.
+            // be valid against the post-reorg UTXO state.  If they
+            // turn out to be invalid (e.g. double-spent by a new-
+            // chain tx), mining will skip them at block assembly.
             for tx in block.transactions.iter().skip(1) {
                 if !s.mempool.contains(&tx.txid()) {
                     s.mempool.add(tx.clone());
                 }
             }
+            undone_persist.push((block, undo));
         }
 
         // 2. Walk `Chain.main_chain` back to the common ancestor.
@@ -1026,13 +1031,8 @@ async fn perform_reorg(
         //    by the first block we're about to apply.
         s.chain.rollback_main_chain_to(common_ancestor);
 
-        // 3. Apply each block on the new branch in order.  Collect
-        //    the `(height, block, undo)` tuples so we can flush
-        //    them to storage after the whole in-memory reorg has
-        //    succeeded.
+        // 3. Apply each block on the new branch in order.
         let now = unix_now();
-        let mut applied_persist: Vec<(u64, bitaiir_types::Block, bitaiir_chain::BlockUndo)> =
-            Vec::with_capacity(applied.len());
         for hash in applied {
             let block = s
                 .chain
@@ -1054,10 +1054,11 @@ async fn perform_reorg(
             }
             applied_persist.push((height, block, undo));
         }
-        Ok(applied_persist)
+
+        Ok((undone_persist, applied_persist))
     })();
 
-    let applied_persist = match applied_persist {
+    let (undone_persist, applied_persist) = match persist {
         Ok(v) => v,
         Err(msg) => {
             warn!("reorg aborted ({peer_key}): {msg} — restoring pre-reorg state");
@@ -1068,27 +1069,34 @@ async fn perform_reorg(
         }
     };
 
-    // 4. In-memory reorg succeeded.  Flush the new-chain blocks to
-    //    storage.  Individual `storage.apply_block` calls are
-    //    atomic in redb; if one fails, earlier ones have already
-    //    committed.  The in-memory state is consistent; storage is
-    //    only inconsistent with memory on disk errors, which are
-    //    rare and self-heal via peer resync after restart.
-    for (height, block, undo) in &applied_persist {
-        if let Err(e) = storage.apply_block(*height, block, undo) {
-            warn!("reorg persist: storage.apply_block({height}) failed: {e}");
-        }
+    // 4. In-memory reorg succeeded.  Commit the whole transition to
+    //    disk in a single atomic redb write transaction via
+    //    `Storage::apply_reorg`: either disk is fully post-reorg or
+    //    fully pre-reorg, never partially either way.  If this
+    //    commit fails (disk error, out of space) the in-memory
+    //    state we've already mutated is ahead of disk — which is
+    //    recovered on next restart by reloading from disk and
+    //    re-syncing via P2P.
+    let new_tip_height = s.chain.height();
+    let new_tip_hash = s.chain.tip();
+    if let Err(e) = storage.apply_reorg(
+        old_tip_height,
+        new_tip_height,
+        new_tip_hash,
+        &undone_persist,
+        &applied_persist,
+    ) {
+        warn!("reorg persist: storage.apply_reorg failed: {e}");
     }
 
     // 5. Bump the peer's best_height to the new tip height.
-    let new_height = s.chain.height();
     for p in &mut s.peers {
         if p.addr == peer_key {
-            p.best_height = p.best_height.max(new_height);
+            p.best_height = p.best_height.max(new_tip_height);
             break;
         }
     }
-    info!("reorg complete: new tip height {new_height} (peer {peer_key})");
+    info!("reorg complete: new tip height {new_tip_height} (peer {peer_key})");
     true
 }
 

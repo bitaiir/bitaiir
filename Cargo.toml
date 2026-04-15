@@ -133,6 +133,10 @@ siphasher = "1"
 # wins" fork choice.
 primitive-types = { version = "0.12", default-features = false, features = ["std"] }
 
+# Temporary files and directories — used by tests that spin up a
+# real redb database in isolation.
+tempfile = "3"
+
 # Release profile: optimize hard, strip symbols, abort on panic for smaller
 # binaries. We override this for benchmarks if/when we add them.
 [profile.release]
