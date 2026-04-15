@@ -432,12 +432,16 @@ pub async fn run_gossip_loop(
     let _ = writer.flush().await;
 
     // Header-first sync kickoff.  If the peer claims a taller chain,
-    // ask for their headers starting right after our current tip.  We
-    // validate PoW on each incoming header before committing bandwidth
-    // to downloading the corresponding block bodies.
-    let our_height = state.read().await.chain.height();
+    // send a block locator (newest-first list of hashes, exponentially
+    // spaced, terminating at genesis) so the peer can find the
+    // deepest common ancestor on our chain in one round trip — no
+    // retry needed even when the two chains share only the genesis.
+    let (our_height, locator) = {
+        let s = state.read().await;
+        (s.chain.height(), s.chain.build_locator())
+    };
     if peer_best_height > our_height {
-        let m = NetMessage::GetHeaders(our_height);
+        let m = NetMessage::GetHeaders(locator);
         let p = m.to_payload();
         let f = protocol::frame_message(m.command(), &p);
         let _ = writer.write_all(&f).await;
@@ -453,14 +457,6 @@ pub async fn run_gossip_loop(
     // reconstruct from our mempool.  Keyed by the compact block's
     // header hash; lifetime is bounded by the peer connection.
     let mut pending_compact: HashMap<Hash256, PendingCompactBlock> = HashMap::new();
-
-    // Whether we've already retried `GetHeaders(0)` on this
-    // connection after an initial header-chain validation failure.
-    // A peer whose main chain diverged before our current tip can't
-    // answer `GetHeaders(our_height)` with a chain we can validate,
-    // so on first failure we ask again from genesis.  One retry per
-    // connection is enough; persistent invalidity means a bad peer.
-    let mut headers_retried_from_genesis: bool = false;
 
     loop {
         tokio::select! {
@@ -490,12 +486,21 @@ pub async fn run_gossip_loop(
                 )
             } => {
                 match result {
-                    Ok(Some(NetMessage::GetHeaders(start_height))) => {
-                        // Serve a contiguous batch of headers starting
-                        // right after `start_height`, capped at
-                        // `MAX_HEADERS_PER_MESSAGE`.
+                    Ok(Some(NetMessage::GetHeaders(locator))) => {
+                        // Walk the locator newest-first looking for
+                        // the first hash that lives on our main
+                        // chain — that's the deepest common
+                        // ancestor.  If nothing in the locator is
+                        // on our chain (e.g. peer started from a
+                        // different genesis), fall back to sending
+                        // headers from height 1 so the peer at
+                        // least gets a chance to reject or retry.
                         let headers: Vec<bitaiir_types::BlockHeader> = {
                             let s = state.read().await;
+                            let start_height = locator
+                                .iter()
+                                .find_map(|h| s.chain.height_of(h))
+                                .unwrap_or(0);
                             let tip = s.chain.height();
                             let last = tip.min(
                                 start_height
@@ -514,11 +519,11 @@ pub async fn run_gossip_loop(
                     Ok(Some(NetMessage::Headers(headers))) => {
                         // Validate the header chain cheaply:
                         //   (1) the first header's `prev_block_hash`
-                        //       is a block we already know (either
-                        //       our current tip, or an earlier block
-                        //       we have in the index),
+                        //       is a block we already know (the
+                        //       common ancestor the sender picked
+                        //       from our locator);
                         //   (2) every subsequent header chains from
-                        //       its predecessor in the batch, and
+                        //       its predecessor in the batch;
                         //   (3) every header's PoW meets its own
                         //       `bits` target.
                         // Full consensus (merkle root, tx validity,
@@ -526,12 +531,13 @@ pub async fn run_gossip_loop(
                         // bodies arrive, so a malicious peer can at
                         // worst waste our time — not corrupt state.
                         //
-                        // If the first header's parent is unknown,
-                        // the peer's main chain likely diverged
-                        // before our current tip.  We retry once with
-                        // `GetHeaders(0)` to pull from genesis so we
-                        // can reconstruct the common ancestor's
-                        // side of the fork.
+                        // Because we sent a block locator rather
+                        // than a bare start height, a peer that
+                        // speaks the protocol correctly will always
+                        // anchor its response at a block we know.
+                        // Anchors we don't recognise are now a hard
+                        // error, no retry — that path was the old
+                        // `GetHeaders(u64)` workaround.
                         let first_prev_known = if let Some(h) = headers.first() {
                             let s = state.read().await;
                             s.chain.contains(&h.prev_block_hash)
@@ -561,11 +567,8 @@ pub async fn run_gossip_loop(
                             // Determine a sensible start height for
                             // the follow-up `GetBlocks`: the height
                             // of the common ancestor on our main
-                            // chain (if any), otherwise 0.  Asking
-                            // from an earlier height than strictly
-                            // necessary is harmless — every block
-                            // we already have short-circuits as
-                            // `Duplicate` inside `accept_block`.
+                            // chain (guaranteed to exist — it's the
+                            // locator hit the sender anchored on).
                             let request_from = {
                                 let s = state.read().await;
                                 s.chain
@@ -581,21 +584,6 @@ pub async fn run_gossip_loop(
                                 let _ = ev.send(format!(
                                     "  {} headers validated from {peer_key}, fetching bodies from height {request_from}",
                                     headers.len(),
-                                ));
-                            }
-                        } else if !headers.is_empty() && !headers_retried_from_genesis {
-                            // First-parent unknown or chain broken.
-                            // Retry from genesis once — the peer may
-                            // have diverged earlier than our tip.
-                            headers_retried_from_genesis = true;
-                            let m = NetMessage::GetHeaders(0);
-                            let p = m.to_payload();
-                            let f = protocol::frame_message(m.command(), &p);
-                            if writer.write_all(&f).await.is_err() { break; }
-                            let _ = writer.flush().await;
-                            if let Some(ev) = &events {
-                                let _ = ev.send(format!(
-                                    "  peer {peer_key}: retrying header sync from genesis",
                                 ));
                             }
                         } else if !headers.is_empty() {
