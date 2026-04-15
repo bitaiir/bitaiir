@@ -426,6 +426,7 @@ async fn main() {
         // locked — the user must call /walletpassphrase to unlock.
         wallet_unlocked: !wallet_encrypted,
         wallet_lock_at: 0,
+        pending_spends: std::collections::HashSet::new(),
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));

@@ -1448,7 +1448,7 @@ fn handle_command(
             "  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"
         )),
         "sendtoaddress" if parts.len() < 3 => Some(format!(
-            "  {DIM}Usage: /sendtoaddress <addr> <amount>{RESET}"
+            "  {DIM}Usage: /sendtoaddress <addr> <amount> [priority]{RESET}"
         )),
         "sendtoaddress" if !is_valid_address(parts[1]) => Some(format!(
             "  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"
@@ -1525,8 +1525,14 @@ fn handle_command(
             "listaddresses" => client.request("listaddresses", rpc_params![]).await,
             "sendtoaddress" => {
                 let amt: f64 = parts[2].parse().unwrap();
+                // Optional 4th arg = priority multiplier (u64).
+                // Defaults to 1 (minimum target, cheapest accepted).
+                let priority: Option<u64> = parts.get(3).and_then(|s| s.parse().ok());
                 client
-                    .request("sendtoaddress", rpc_params![parts[1].clone(), amt])
+                    .request(
+                        "sendtoaddress",
+                        rpc_params![parts[1].clone(), amt, priority],
+                    )
                     .await
             }
             "getmempoolinfo" => client.request("getmempoolinfo", rpc_params![]).await,

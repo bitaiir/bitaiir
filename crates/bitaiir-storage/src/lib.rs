@@ -592,6 +592,7 @@ mod tests {
             }],
             locktime: 0,
             pow_nonce: 0,
+            pow_priority: 1,
         }
     }
 
@@ -762,6 +763,7 @@ mod tests {
             }],
             locktime: 0,
             pow_nonce: 0,
+            pow_priority: 1,
         };
         let cb = coinbase(100);
         let merkle = merkle_root(&[cb.txid(), spender_tx.txid()]);

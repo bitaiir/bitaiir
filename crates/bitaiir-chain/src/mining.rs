@@ -303,6 +303,7 @@ fn build_coinbase(height: u64, recipient_hash: [u8; 20], amount: Amount) -> Tran
         }],
         locktime: 0,
         pow_nonce: 0,
+        pow_priority: 1,
     }
 }
 
@@ -323,6 +324,7 @@ fn build_genesis_coinbase(recipient_hash: [u8; 20], amount: Amount, message: &st
         }],
         locktime: 0,
         pow_nonce: 0,
+        pow_priority: 1,
     }
 }
 

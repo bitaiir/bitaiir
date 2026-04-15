@@ -53,6 +53,7 @@ pub(crate) fn sample_coinbase(height: u64) -> Transaction {
         }],
         locktime: 0,
         pow_nonce: 0,
+        pow_priority: 1,
     }
 }
 
@@ -81,6 +82,7 @@ pub(crate) fn sample_normal_tx(spend: OutPoint, _pow_nonce: u64) -> Transaction 
         }],
         locktime: 0,
         pow_nonce: 0,
+        pow_priority: 1,
     };
 
     // Sign first (sighash clears pow_nonce internally, so order

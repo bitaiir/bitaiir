@@ -70,6 +70,7 @@ pub fn mine_genesis() -> Block {
         }],
         locktime: 0,
         pow_nonce: 0,
+        pow_priority: 1,
     };
 
     let merkle_root = coinbase.txid();
