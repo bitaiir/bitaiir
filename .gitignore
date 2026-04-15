@@ -150,3 +150,6 @@ data_b/
 
 # Local config file (bitaiir.toml.example is tracked instead)
 bitaiir.toml
+
+# Local Claude Code project briefing — machine-specific, never committed
+CLAUDE.md
