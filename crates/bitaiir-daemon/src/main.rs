@@ -31,6 +31,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 mod config;
+mod log;
 mod peer_manager;
 mod rpc_auth;
 mod tui;
@@ -174,7 +175,7 @@ async fn main() {
 
     // In TUI mode, skip the tracing subscriber: raw mode means stdout
     // output would corrupt the terminal. System events go through the
-    // log channel instead.
+    // unified log module instead.
     if !args.interactive {
         tracing_subscriber::fmt()
             .with_target(false)
@@ -182,26 +183,24 @@ async fn main() {
             .init();
     }
 
-    // Collect startup banner lines — printed to console in daemon
-    // mode and flushed to the TUI log channel in interactive mode
-    // so they appear inside the TUI box on startup.  Lines that
-    // depend on later resolution (RPC auth, allow_ip) are pushed
-    // further down when their values become available.
-    let mut startup_msgs: Vec<String> = vec![
-        String::new(),
-        "  BitAiir Core v0.1.0".to_string(),
-        format!("  Network:    {}", network.name()),
-        "  Proof of Aiir (SHA-256d + Argon2id)".to_string(),
-        "  Target block time: 5s | Retarget every 20 blocks".to_string(),
-        format!("  P2P server: {}", args.p2p_addr),
-        format!("  Data dir:   {}/", args.data_dir),
-    ];
+    // Create the TUI events channel early so the unified log module
+    // can send to the TUI from the very first banner line.
+    let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
+    let events_sender: Option<std::sync::mpsc::Sender<String>> = if args.interactive {
+        Some(log_tx.clone())
+    } else {
+        None
+    };
 
-    if !args.interactive {
-        for msg in &startup_msgs {
-            println!("{msg}");
-        }
-    }
+    // --- Startup banner ------------------------------------------------- //
+    let ev = &events_sender;
+    log::print_line("", ev);
+    log::print_line("  BitAiir Core v0.1.0", ev);
+    log::print_line(&format!("  Network:    {}", network.name()), ev);
+    log::print_line("  Proof of Aiir (SHA-256d + Argon2id)", ev);
+    log::print_line("  Target block time: 5s | Retarget every 20 blocks", ev);
+    log::print_line(&format!("  P2P server: {}", args.p2p_addr), ev);
+    log::print_line(&format!("  Data dir:   {}/", args.data_dir), ev);
 
     // --- Open storage ---------------------------------------------------- //
 
@@ -213,7 +212,7 @@ async fn main() {
     let (chain, utxo, wallet, miner_recipient_hash) =
         if storage.has_chain().expect("storage check failed") {
             // Resume from disk.
-            println!("  Loading chain from disk...");
+            log::print_line("  Loading chain from disk...", ev);
 
             let (tip_height, tip_hash) = storage
                 .load_chain_tip()
@@ -270,7 +269,10 @@ async fn main() {
                         // We'll use it for the miner address if needed.
                     }
                 }
-                println!("  Wallet is encrypted ({} address(es)).", raw_keys.len());
+                log::print_line(
+                    &format!("  Wallet is encrypted ({} address(es)).", raw_keys.len()),
+                    ev,
+                );
                 println!("  Use /walletpassphrase <pass> <timeout> to unlock.");
             } else {
                 // Unencrypted: import all keys normally.
@@ -311,13 +313,19 @@ async fn main() {
                 hash160(&pubkey.to_compressed())
             };
 
-            println!(
-                "  Loaded: height={tip_height}, tip={}",
-                short_hash(&tip_hash.to_string())
+            log::print_line(
+                &format!(
+                    "  Loaded: height={tip_height}, tip={}",
+                    short_hash(&tip_hash.to_string())
+                ),
+                ev,
             );
-            println!("  UTXOs:  {}", utxo.len());
-            println!("  Wallet: {} address(es)", wallet.addresses().len());
-            println!();
+            log::print_line(&format!("  UTXOs:  {}", utxo.len()), ev);
+            log::print_line(
+                &format!("  Wallet: {} address(es)", wallet.addresses().len()),
+                ev,
+            );
+            log::print_line("", ev);
 
             (chain, utxo, wallet, miner_hash)
         } else {
@@ -325,22 +333,27 @@ async fn main() {
             // All nodes produce the exact same genesis (fixed timestamp,
             // fixed message, burn address) so P2P sync works between
             // nodes that never shared data.
-            if !args.interactive {
-                println!("  Mining genesis block (first start)...");
-            }
+            log::print_line("  Mining genesis block (first start)...", ev);
             let t = Instant::now();
             let genesis = mine_genesis();
-            if !args.interactive {
-                println!("  Genesis mined in {:.1}s", t.elapsed().as_secs_f64());
-                println!(
+            log::print_line(
+                &format!("  Genesis mined in {:.1}s", t.elapsed().as_secs_f64()),
+                ev,
+            );
+            log::print_line(
+                &format!(
                     "  Hash:    {}",
                     short_hash(&genesis.block_hash().to_string())
-                );
-                println!("  Reward:  {} (burn address, unspendable)", subsidy(0));
-                let msg = String::from_utf8_lossy(&genesis.transactions[0].inputs[0].signature);
-                println!("  Message: \"{msg}\"");
-                println!();
-            }
+                ),
+                ev,
+            );
+            log::print_line(
+                &format!("  Reward:  {} (burn address, unspendable)", subsidy(0)),
+                ev,
+            );
+            let msg = String::from_utf8_lossy(&genesis.transactions[0].inputs[0].signature);
+            log::print_line(&format!("  Message: \"{msg}\""), ev);
+            log::print_line("", ev);
 
             let mut utxo = UtxoSet::new();
             let genesis_undo = utxo
@@ -364,10 +377,8 @@ async fn main() {
                 .save_wallet_key(&miner_address, &privkey, &pubkey)
                 .expect("save miner wallet key");
 
-            if !args.interactive {
-                println!("  Miner address: {miner_address}");
-                println!();
-            }
+            log::print_line(&format!("  Miner address: {miner_address}"), ev);
+            log::print_line("", ev);
 
             let chain = Chain::with_genesis(genesis);
             (chain, utxo, wallet, miner_hash)
@@ -444,14 +455,6 @@ async fn main() {
     // Mining is controlled by this atomic flag.
     let mining_active = Arc::new(AtomicBool::new(args.mine));
 
-    // Channel for routing mining + P2P + system events to the TUI.
-    let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
-    let events_sender = if args.interactive {
-        Some(log_tx.clone())
-    } else {
-        None
-    };
-
     // --- Resolve RPC credentials ----------------------------------------- //
     //
     // Cookie file at `<data_dir>/.cookie` unless the operator put
@@ -466,12 +469,10 @@ async fn main() {
     .expect("failed to prepare RPC credentials");
     match &rpc_creds.cookie_path {
         Some(path) => {
-            startup_msgs.push(format!("  RPC auth:   cookie ({})", path.display()));
-            info!("RPC cookie written to {}", path.display());
+            log::log_info(&format!("RPC auth: cookie ({})", path.display()), ev);
         }
         None => {
-            startup_msgs.push("  RPC auth:   config credentials (rpc.user)".to_string());
-            info!("RPC auth using rpc.user/rpc.password from config");
+            log::log_info("RPC auth: config credentials (rpc.user)", ev);
         }
     }
 
@@ -495,21 +496,14 @@ async fn main() {
 
     // If `rpc.allow_ip` is set, jsonrpsee binds on a random
     // loopback port and a filtering TCP proxy binds on the
-    // configured public address.  Connections from IPs not in the
-    // allowlist are silently dropped before auth is even attempted.
-    // If allow_ip is unset, jsonrpsee binds directly on the
-    // configured address (no proxy overhead).
+    // configured public address.
     let allow_nets: Option<Vec<ipnet::IpNet>> = cfg.rpc.allow_ip.as_ref().map(|list| {
         list.iter()
             .filter_map(|s| {
                 s.parse::<ipnet::IpNet>()
-                    .or_else(|_| {
-                        // Bare IPs like "127.0.0.1" don't parse as
-                        // IpNet directly — wrap in /32 or /128.
-                        s.parse::<std::net::IpAddr>().map(ipnet::IpNet::from)
-                    })
+                    .or_else(|_| s.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
                     .map_err(|e| {
-                        warn!("ignoring invalid allow_ip entry '{s}': {e}");
+                        log::log_warn(&format!("ignoring invalid allow_ip entry '{s}': {e}"), ev);
                         e
                     })
                     .ok()
@@ -532,23 +526,27 @@ async fn main() {
     let rpc_local_addr = server.local_addr().expect("server has a local addr");
     let rpc_handle = server.start(rpc_impl.into_rpc());
 
-    // Spawn the IP-filtering TCP proxy if allow_ip is configured.
     if let Some(nets) = allow_nets {
         let public_addr = args.rpc_addr.clone();
         let internal = rpc_local_addr;
-        let rule_count = nets.len();
         let net_strs: Vec<String> = nets.iter().map(ToString::to_string).collect();
-        startup_msgs.push(format!(
-            "  RPC allow:  {} rule(s): {}",
-            rule_count,
-            net_strs.join(", ")
-        ));
+        log::log_info(
+            &format!(
+                "RPC allow_ip: {} rule(s) [{}]",
+                nets.len(),
+                net_strs.join(", ")
+            ),
+            ev,
+        );
         let proxy_events = events_sender.clone();
         tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::bind(&public_addr).await {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("  RPC allow_ip proxy: failed to bind {public_addr}: {e}");
+                    log::log_warn(
+                        &format!("RPC allow_ip proxy: failed to bind {public_addr}: {e}"),
+                        &proxy_events,
+                    );
                     return;
                 }
             };
@@ -556,11 +554,10 @@ async fn main() {
                 match listener.accept().await {
                     Ok((mut client, addr)) => {
                         if !nets.iter().any(|net| net.contains(&addr.ip())) {
-                            if let Some(ev) = &proxy_events {
-                                let _ = ev.send(format!(
-                                    "  RPC: rejected connection from {addr} (not in allow_ip)"
-                                ));
-                            }
+                            log::log_warn(
+                                &format!("RPC: rejected connection from {addr} (not in allow_ip)"),
+                                &proxy_events,
+                            );
                             continue;
                         }
                         tokio::spawn(async move {
@@ -572,34 +569,24 @@ async fn main() {
                         });
                     }
                     Err(e) => {
-                        if let Some(ev) = &proxy_events {
-                            let _ = ev.send(format!("  RPC proxy accept error: {e}"));
-                        }
+                        log::log_warn(&format!("RPC proxy accept error: {e}"), &proxy_events);
                     }
                 }
             }
         });
-        startup_msgs.push(format!(
-            "  RPC server: http://{} (IP-filtered)",
-            args.rpc_addr
-        ));
+        log::log_info(
+            &format!("RPC server listening on http://{} (IP-filtered)", args.rpc_addr),
+            ev,
+        );
     } else {
-        startup_msgs.push(format!("  RPC server: http://{}", args.rpc_addr));
+        log::log_info(
+            &format!("RPC server listening on http://{}", args.rpc_addr),
+            ev,
+        );
     }
 
-    // Print the remaining startup lines to console in daemon mode;
-    // flush all of them into the TUI log channel in interactive mode.
-    if !args.interactive {
-        for msg in startup_msgs.iter().skip(7) {
-            println!("{msg}");
-        }
-        println!();
-    } else {
-        startup_msgs.push(String::new());
-        for msg in &startup_msgs {
-            let _ = log_tx.send(msg.clone());
-        }
-    }
+    log::log_info(&format!("P2P listener on {}", args.p2p_addr), ev);
+    log::print_line("", ev);
 
     // --- Start P2P listener ---------------------------------------------- //
     //
@@ -619,7 +606,6 @@ async fn main() {
                 return;
             }
         };
-        info!("P2P listener on {p2p_addr}");
 
         loop {
             match listener.accept().await {
@@ -715,8 +701,9 @@ async fn main() {
 
     // --- Mining in background thread ------------------------------------- //
 
-    if !args.mine && !args.interactive {
-        info!("Mining disabled. Use --mine flag to enable.");
+    if !args.mine {
+        let hint = if args.interactive { "/mine-start" } else { "--mine" };
+        log::log_info(&format!("Mining disabled (use {hint} to enable)"), ev);
     }
 
     let mining_state = state.clone();
@@ -737,7 +724,7 @@ async fn main() {
     };
 
     if args.mine {
-        info!("Mining enabled (--mine), {mining_threads} thread(s).");
+        log::log_info(&format!("Mining enabled ({mining_threads} thread(s))"), ev);
     }
 
     // Clone so the TUI (spawned below) can still use `log_tx` after
