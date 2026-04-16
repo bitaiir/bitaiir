@@ -71,6 +71,9 @@ pub use mining::{
 pub use pow::aiir_pow;
 pub use subsidy::{BLOCKS_PER_HALVING, INITIAL_SUBSIDY, TAIL_EMISSION, subsidy};
 pub use target::CompactTarget;
-pub use tx_pow::{mine_tx_pow, tx_pow_hash, validate_tx_pow};
+pub use tx_pow::{
+    min_tx_pow_target, mine_tx_pow, mine_tx_pow_with_priority, mine_tx_pow_with_target,
+    tx_pow_hash, validate_tx_pow,
+};
 pub use utxo::{BlockUndo, SpentInput, UtxoSet};
 pub use validation::{validate_block, validate_block_standalone, validate_transaction};

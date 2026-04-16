@@ -101,6 +101,7 @@ fn sample_transaction() -> Transaction {
         ],
         locktime: 0,
         pow_nonce: 7,
+        pow_priority: 1,
     }
 }
 

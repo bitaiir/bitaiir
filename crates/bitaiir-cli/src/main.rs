@@ -66,6 +66,12 @@ enum Commands {
         address: String,
         /// Amount in AIIR (e.g. 10.5).
         amount: f64,
+        /// Mempool priority: u64 multiplier of tx-PoW CPU cost over
+        /// the minimum target.  Default 1 (minimum).  Priority 2
+        /// costs ~2x more CPU, priority 10 costs ~10x, etc.  Only
+        /// useful when the network is congested.
+        #[arg(long, default_value_t = 1)]
+        priority: u64,
     },
     /// Show transaction history for an address.
     Gettransactionhistory {
@@ -163,7 +169,9 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Sendtoaddress { address, amount } => {
+        Commands::Sendtoaddress {
+            address, amount, ..
+        } => {
             if !is_valid_address(address) {
                 eprintln!("Error: '{}' is not a valid BitAiir address.", address);
                 std::process::exit(1);
@@ -191,9 +199,16 @@ async fn main() {
                 .request("getbalance", rpc_params![address.clone()])
                 .await
         }
-        Commands::Sendtoaddress { address, amount } => {
+        Commands::Sendtoaddress {
+            address,
+            amount,
+            priority,
+        } => {
             client
-                .request("sendtoaddress", rpc_params![address.clone(), *amount])
+                .request(
+                    "sendtoaddress",
+                    rpc_params![address.clone(), *amount, Some(*priority)],
+                )
                 .await
         }
         Commands::Gettransactionhistory { address } => {

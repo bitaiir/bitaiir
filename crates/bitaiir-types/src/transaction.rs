@@ -81,11 +81,20 @@ pub struct TxOut {
 /// transaction carries an extra `pow_nonce` at the end. This is the
 /// Hashcash-style anti-spam proof of work defined in protocol §6.7:
 /// the sender mines `pow_nonce` until the transaction's double
-/// SHA-256 (with `pow_nonce = 0` for that step) meets a small target,
-/// costing roughly two seconds of CPU time on a commodity laptop.
-/// The field replaces the minimum-fee rule that Bitcoin uses to
-/// throttle spam — BitAiir keeps fees optional and prices abuse in
-/// sender-side CPU instead.
+/// SHA-256 (with `pow_nonce = 0` for that step) meets a target,
+/// costing roughly two seconds of CPU time on a commodity laptop at
+/// the minimum priority.  The field replaces the minimum-fee rule
+/// that Bitcoin uses to throttle spam — BitAiir keeps fees optional
+/// and prices abuse in sender-side CPU instead.
+///
+/// Senders who want their transaction to win ordering in the
+/// mempool can declare a higher [`pow_priority`][Transaction::pow_priority]
+/// and mine against a proportionally stricter target.  Validation
+/// enforces `hash < min_target / pow_priority`, so a tx at priority
+/// 5 must have done ~5× the CPU work of a tx at priority 1.  The
+/// mempool orders entries by declared `pow_priority` descending,
+/// with arrival order as the tiebreaker — priority is deterministic,
+/// not probabilistic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     /// Protocol version this transaction was produced under.
@@ -103,6 +112,18 @@ pub struct Transaction {
     /// [`Transaction::sighash`] for why this field is cleared during
     /// signature computation.
     pub pow_nonce: u64,
+    /// Declared mempool priority: a multiplier of the minimum tx-PoW
+    /// work.  `1` is the default and cheapest accepted; higher values
+    /// require the sender to mine against a proportionally stricter
+    /// target (`min_target / pow_priority`).  Validation rejects txs
+    /// whose hash does not meet the declared target, so a tx can't
+    /// falsely claim priority without paying the CPU cost.
+    ///
+    /// Coinbase transactions set this to `1` and are exempt from the
+    /// check.  Like `pow_nonce`, this field is cleared during
+    /// signature computation ([`Transaction::sighash`]) so changing
+    /// it doesn't invalidate signatures.
+    pub pow_priority: u64,
 }
 
 impl Transaction {
@@ -128,22 +149,23 @@ impl Transaction {
     /// Compute the signing digest (sighash) that each input must sign.
     ///
     /// Per protocol §6.4, the sighash is `double_sha256` of a canonical
-    /// encoding of the transaction with two modifications applied to a
-    /// clone:
+    /// encoding of the transaction with three modifications applied to
+    /// a clone:
     ///
     /// - Every input's `signature` field is cleared to an empty `Vec`.
     /// - The `pow_nonce` field is cleared to `0`.
+    /// - The `pow_priority` field is cleared to `0`.
     ///
     /// The `pubkey` fields are left intact so the recovered key can be
     /// matched against each input's declared public key.
     ///
     /// Clearing `signature` is the classic reason — a signature cannot
-    /// sign over itself. Clearing `pow_nonce` is the BitAiir-specific
-    /// twist: the anti-spam proof of work is mined **after** signing,
-    /// because mining it requires the final transaction shape. If the
-    /// sighash included `pow_nonce`, the sender would face a
-    /// chicken-and-egg problem (sign → change nonce → invalidate
-    /// signature → re-sign → change nonce again → ...). Excluding it
+    /// sign over itself. Clearing `pow_nonce` and `pow_priority` is the
+    /// BitAiir-specific twist: the anti-spam proof of work is mined
+    /// **after** signing, because mining it requires the final
+    /// transaction shape. If the sighash included the PoW fields, the
+    /// sender would face a chicken-and-egg problem (sign → mine →
+    /// invalidate signature → re-sign → re-mine → ...). Excluding them
     /// breaks the loop: the signature covers the "template" of the
     /// transaction, and the spam proof is a free-standing seal on top.
     pub fn sighash(&self) -> Hash256 {
@@ -152,6 +174,7 @@ impl Transaction {
             input.signature.clear();
         }
         template.pow_nonce = 0;
+        template.pow_priority = 0;
 
         let bytes = encoding::to_bytes(&template).expect("Transaction always encodes");
         Hash256::from_bytes(double_sha256(&bytes))

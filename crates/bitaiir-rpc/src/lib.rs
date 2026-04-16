@@ -46,6 +46,13 @@ pub struct NodeState {
     pub wallet_unlocked: bool,
     /// When the wallet should auto-lock (Unix timestamp, 0 = never).
     pub wallet_lock_at: u64,
+    /// UTXOs reserved by in-flight `send_to_address` calls that
+    /// have selected their inputs but haven't yet reached the
+    /// mempool (tx-PoW still being mined in background).  UTXO
+    /// selection skips these so two concurrent sends never pick
+    /// the same input and collapse into a single transaction.
+    /// Cleared on background-task completion regardless of success.
+    pub pending_spends: std::collections::HashSet<bitaiir_types::OutPoint>,
 }
 
 /// One live P2P connection.
@@ -290,6 +297,40 @@ impl Wallet {
         total
     }
 
+    /// Same as [`Self::spendable_balance_of`] but also excludes any
+    /// outpoint in `pending` — used during `send_to_address` UTXO
+    /// selection so a concurrent in-flight send's reserved inputs
+    /// are treated as unavailable for the new send.
+    pub fn spendable_balance_excluding_pending(
+        address: &str,
+        utxo: &UtxoSet,
+        tip_height: u64,
+        pending: &std::collections::HashSet<OutPoint>,
+    ) -> u64 {
+        let recipient_hash = match address_to_recipient_hash(address) {
+            Some(h) => h,
+            None => return 0,
+        };
+        let maturity = bitaiir_chain::consensus::coinbase_maturity();
+
+        let mut total: u64 = 0;
+        for (outpoint, txout) in utxo.iter() {
+            if txout.recipient_hash != recipient_hash {
+                continue;
+            }
+            if pending.contains(outpoint) {
+                continue;
+            }
+            if let Some(cb_height) = utxo.coinbase_height(outpoint) {
+                if tip_height < cb_height + maturity {
+                    continue;
+                }
+            }
+            total = total.saturating_add(txout.amount.to_atomic());
+        }
+        total
+    }
+
     /// Balance split into `(confirmed, unconfirmed, immature)`.
     ///
     /// - **confirmed**: outputs with >= `RECOMMENDED_CONFIRMATIONS`
@@ -374,6 +415,7 @@ pub trait BitaiirApi {
         &self,
         to_address: String,
         amount: f64,
+        priority: Option<u64>,
     ) -> RpcResult<serde_json::Value>;
 
     /// List all transactions involving an address (sent and received),
@@ -627,7 +669,16 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         &self,
         to_address: String,
         amount: f64,
+        priority: Option<u64>,
     ) -> RpcResult<serde_json::Value> {
+        // Resolve priority up-front.  `1` is the default — same CPU
+        // cost as a stock send.  Higher values mine against a
+        // target `min / priority`, which produces a lower
+        // `tx_pow_hash` and promotes the tx in the mempool's
+        // ascending-hash ordering.  A tx at priority `P` takes
+        // roughly `P` times more CPU to mine than priority 1.
+        let priority = priority.unwrap_or(1).max(1);
+
         // Check wallet lock state.
         {
             let state = self.state.read().await;
@@ -675,27 +726,58 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             )
         })?;
 
-        // --- Phase 1: snapshot under a READ lock ------------------------ //
+        // --- Phase 1: snapshot + reserve under a WRITE lock ------------- //
         //
         // Collect everything we need to build the transaction (keys,
-        // inputs, balances) and then drop the lock before running the
-        // ~2 s anti-spam PoW.  Holding the write lock across that work
-        // would freeze the mining thread and the TUI.
+        // inputs, balances) and **reserve** the selected outpoints in
+        // `pending_spends` atomically so a concurrent `send_to_address`
+        // can't pick the same input while we're still mining PoW.
+        // Without this, two in-flight sends can collapse into a single
+        // identical transaction if their mined nonces happen to
+        // overlap (common — same inputs + same outputs + same signature
+        // deterministically produces the same tx modulo nonce).
         //
-        // UTXO selection skips immature coinbases — they pass the
-        // `recipient_hash` check but would be rejected by consensus
-        // rules downstream, so picking them here would make the
-        // transaction explode with a confusing error.
+        // UTXO selection skips:
+        //   - immature coinbases (not yet spendable),
+        //   - outpoints already reserved by other in-flight sends.
+        //
+        // The lock is dropped before the ~2 s tx-pow grind — only the
+        // snapshot + reserve step runs under write.
         let (from_address, privkey, pubkey_bytes, from_hash, selected_utxos, inputs_total) = {
-            let state = self.state.read().await;
+            let mut state = self.state.write().await;
             let tip_height = state.chain.height();
             let maturity = bitaiir_chain::consensus::coinbase_maturity();
 
-            // Find a wallet address with enough *spendable* balance.
+            // Collect every outpoint currently being spent by a tx in
+            // the mempool.  The UTXO set still lists those outpoints
+            // (they won't be removed until the mempool tx is mined
+            // into a block), but selecting them now would produce a
+            // conflicting transaction that fails validation the
+            // instant the first one confirms.  Paired with
+            // `pending_spends` — which covers the still-in-flight
+            // window before mempool.add — this rules out every way
+            // a UTXO could already be committed.
+            let mempool_spent: std::collections::HashSet<OutPoint> = state
+                .mempool
+                .iter()
+                .flat_map(|(_, tx)| tx.inputs.iter().map(|i| i.prev_out))
+                .collect();
+
+            // Find a wallet address with enough spendable balance that
+            // isn't reserved in-flight and isn't already consumed by
+            // a mempool tx.
             let addresses = state.wallet.addresses();
+            let pending = state.pending_spends.clone();
+            let mut excluded = pending.clone();
+            excluded.extend(mempool_spent.iter().copied());
             let mut from_address: Option<String> = None;
             for addr in &addresses {
-                let bal = Wallet::spendable_balance_of(addr, &state.utxo, tip_height);
+                let bal = Wallet::spendable_balance_excluding_pending(
+                    addr,
+                    &state.utxo,
+                    tip_height,
+                    &excluded,
+                );
                 if bal >= amount_atoms {
                     from_address = Some(addr.clone());
                     break;
@@ -704,7 +786,8 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             let from_address = from_address.ok_or_else(|| {
                 jsonrpsee::types::ErrorObjectOwned::owned(
                     -2,
-                    "insufficient spendable balance (immature coinbases don't count)",
+                    "insufficient spendable balance (immature coinbases, \
+                     in-flight sends, and mempool-spent outputs don't count)",
                     None::<()>,
                 )
             })?;
@@ -731,6 +814,14 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                         continue;
                     }
                 }
+                // Skip outpoints already reserved by a concurrent send
+                // or already being spent by a mempool tx.
+                if state.pending_spends.contains(outpoint) {
+                    continue;
+                }
+                if mempool_spent.contains(outpoint) {
+                    continue;
+                }
                 selected_utxos.push((*outpoint, *txout));
                 inputs_total = inputs_total.saturating_add(txout.amount.to_atomic());
                 if inputs_total >= amount_atoms {
@@ -741,9 +832,16 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             if inputs_total < amount_atoms {
                 return Err(jsonrpsee::types::ErrorObjectOwned::owned(
                     -2,
-                    "insufficient spendable balance (immature coinbases don't count)",
+                    "insufficient spendable balance (immature coinbases and \
+                     in-flight sends don't count)",
                     None::<()>,
                 ));
+            }
+
+            // Reserve the selected outpoints so the next concurrent
+            // send sees them as unavailable.
+            for (op, _) in &selected_utxos {
+                state.pending_spends.insert(*op);
             }
 
             (
@@ -785,6 +883,11 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             outputs,
             locktime: 0,
             pow_nonce: 0,
+            // `pow_priority` is set at mining time by
+            // `mine_tx_pow_with_priority`.  The signature doesn't
+            // cover this field (see `Transaction::sighash`), so
+            // setting it later is safe.
+            pow_priority: 0,
         };
 
         // Sign each input.
@@ -813,11 +916,21 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let bg_events = self.events.clone();
         let bg_to_address = to_address.clone();
         let bg_amount_atoms = amount_atoms;
+        let bg_priority = priority;
+        // Capture the reserved outpoints so the background task can
+        // release them from `pending_spends` on completion — whether
+        // the tx ultimately succeeds, fails revalidation, or is
+        // rejected by the mempool.  Leaking a reservation would make
+        // those outpoints un-spendable until the next restart.
+        let bg_reserved: Vec<OutPoint> = selected_utxos.iter().map(|(op, _)| *op).collect();
         tokio::spawn(async move {
             // Mine tx-PoW on the blocking pool so the tokio reactor
-            // stays responsive while the CPU grinds.
+            // stays responsive while the CPU grinds.  Priority is
+            // a u64 multiplier of work over the minimum — 1 is the
+            // default (cheapest accepted); higher values make the
+            // target smaller and the mining linearly more expensive.
             let tx = match tokio::task::spawn_blocking(move || {
-                bitaiir_chain::mine_tx_pow(&mut tx);
+                bitaiir_chain::mine_tx_pow_with_priority(&mut tx, bg_priority);
                 tx
             })
             .await
@@ -825,6 +938,11 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!("tx pow mining task failed: {e}");
+                    let mut s = bg_state.write().await;
+                    for op in &bg_reserved {
+                        s.pending_spends.remove(op);
+                    }
+                    drop(s);
                     if let Some(ev) = &bg_events {
                         let _ = ev.send(format!("  send_to_address: pow mining failed ({e})"));
                     }
@@ -840,6 +958,10 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             let current_height = s.chain.height();
             if let Err(e) = validate_transaction(&tx, &s.utxo, current_height) {
                 tracing::warn!("send_to_address: tx {txid} failed revalidation: {e}");
+                for op in &bg_reserved {
+                    s.pending_spends.remove(op);
+                }
+                drop(s);
                 if let Some(ev) = &bg_events {
                     let _ = ev.send(format!("  send_to_address: tx {txid} dropped ({e})",));
                 }
@@ -858,6 +980,10 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
             if let Err(e) = s.mempool.add(tx) {
                 tracing::warn!("send_to_address: mempool rejected {txid}: {e}");
+                for op in &bg_reserved {
+                    s.pending_spends.remove(op);
+                }
+                drop(s);
                 if let Some(ev) = &bg_events {
                     let _ = ev.send(format!(
                         "  send_to_address: tx {txid} rejected by mempool ({e})",
@@ -865,6 +991,17 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                 }
                 return;
             }
+
+            // Success path — tx is in the mempool.  Release the
+            // reservation so subsequent sends see those inputs as
+            // truly spent (they're now referenced by the pending tx
+            // in the mempool, and the mempool itself is consulted
+            // via the normal UTXO selection — reserving again would
+            // double-exclude them).
+            for op in &bg_reserved {
+                s.pending_spends.remove(op);
+            }
+            drop(s);
 
             tracing::info!(
                 "send_to_address: tx {txid} broadcast to {peers_notified} peer(s) and added to mempool",
@@ -879,6 +1016,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                     "txid": txid.to_string(),
                     "to": bg_to_address,
                     "amount": format!("{}", Amount::from_atomic(bg_amount_atoms)),
+                    "priority": bg_priority,
                     "peers_notified": peers_notified,
                     "status": "broadcast and added to mempool",
                 });
@@ -899,6 +1037,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             "to": to_address,
             "amount": format!("{}", Amount::from_atomic(amount_atoms)),
             "change": format!("{}", Amount::from_atomic(change)),
+            "priority": priority,
             "peers_notified": peers_notified,
             "status": "accepted for mining (tx-pow + broadcast happen in background)",
         }))

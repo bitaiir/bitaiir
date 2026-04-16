@@ -776,6 +776,7 @@ mod tests {
             }],
             locktime: 0,
             pow_nonce: 0,
+            pow_priority: 1,
         };
         let err = validate_transaction(&tx, &utxo, 100).unwrap_err();
         assert!(matches!(err, Error::NoInputs));
@@ -800,6 +801,7 @@ mod tests {
             outputs: vec![],
             locktime: 0,
             pow_nonce: 7,
+            pow_priority: 1,
         };
         let err = validate_transaction(&tx, &utxo, 100).unwrap_err();
         assert!(matches!(err, Error::NoOutputs));

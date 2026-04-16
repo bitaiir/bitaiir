@@ -1,37 +1,38 @@
-//! Size-capped in-memory mempool with tx-PoW priority ordering.
+//! Size-capped in-memory mempool with declared-priority ordering.
 //!
 //! Transactions enter the mempool when a peer relays them (or the
 //! local wallet creates one) and leave when a miner includes them
 //! in a block.  Keys are transaction IDs; priority is a
-//! `(tx_pow_hash, arrival_seq)` tuple:
+//! `(tx.pow_priority, arrival_seq)` tuple:
 //!
-//! - **Primary key**: `tx_pow_hash` ascending.  A lower hash means
-//!   more leading zero bytes in the anti-spam PoW, which means the
-//!   sender voluntarily mined a stricter target — they pay more
-//!   CPU time, they get priority.  No protocol change needed; the
-//!   ordering falls out of the hash values themselves.
-//! - **Secondary key**: monotonic `arrival_seq` counter.  Older
-//!   transactions at the same difficulty win over newer ones, so
-//!   an honest user's tx isn't displaced by a later-arriving tx of
-//!   identical work.
+//! - **Primary key**: `tx.pow_priority` descending.  Priority is a
+//!   field on the transaction: the sender declares how much CPU
+//!   they've paid (priority N = work against target `min / N`,
+//!   ~N× the CPU of priority 1).  Validation enforces the declared
+//!   target, so the claim is verifiable.  Higher declared priority
+//!   always wins block-assembly order — deterministically, not
+//!   probabilistically.
+//! - **Secondary key**: monotonic `arrival_seq` counter.  At the
+//!   same priority, earlier arrivals come first.
 //!
 //! The fee-less design — BitAiir never charges network fees — means
 //! DoS protection comes entirely from
 //!
 //! 1. the per-tx [`crate::tx_pow`] nonce (already enforced at
 //!    validation time: every non-coinbase tx costs the sender ~2 s
-//!    of CPU),
+//!    of CPU at the minimum priority),
 //! 2. the `max_bytes` cap on mempool size, and
 //! 3. eviction of the lowest-priority entry to make room — an
-//!    attacker trying to displace legitimate high-work txs has to
-//!    spend *more* CPU per slot they steal.
+//!    attacker trying to displace legitimate high-priority txs has
+//!    to mine at even higher priority, which costs proportionally
+//!    more CPU per slot they steal.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 
 use bitaiir_types::{Hash256, Transaction, encoding};
 
 use crate::error::{Error, Result};
-use crate::tx_pow::tx_pow_hash;
 
 /// One transaction's on-demand metadata, cached so eviction,
 /// priority ordering, and byte accounting are O(1) at each step.
@@ -40,10 +41,11 @@ struct MempoolEntry {
     tx: Transaction,
     /// Serialized size of `tx`, summed into `total_bytes`.
     bytes: usize,
-    /// `tx_pow_hash(tx)` — ordering key.  Lower = more work.
-    pow_hash: Hash256,
+    /// Declared `pow_priority` from the transaction.  Higher = more
+    /// CPU paid = earlier in block-assembly ordering.
+    priority: u64,
     /// Arrival counter at insertion time.  Tie-breaker when two
-    /// txs share the same `pow_hash`.
+    /// txs share the same `priority`.
     arrival_seq: u64,
 }
 
@@ -57,12 +59,14 @@ pub struct Mempool {
     /// txid → entry.  O(1) lookup by hash for `contains`, `get`,
     /// `remove`.
     entries: HashMap<Hash256, MempoolEntry>,
-    /// `(pow_hash, arrival_seq) → txid`, sorted ascending so
-    /// - `iter().next()` is the best-priority, oldest-of-ties tx
-    ///   (what miners want for block assembly), and
-    /// - `iter().next_back()` is the worst-priority, newest-of-ties
+    /// `(Reverse(priority), arrival_seq) → txid`, sorted ascending.
+    /// Because `priority` is wrapped in `Reverse`, lower keys
+    /// correspond to **higher** priority — so:
+    /// - `iter().next()` is the highest-priority, oldest-of-ties
+    ///   tx (what miners want for block assembly),
+    /// - `iter().next_back()` is the lowest-priority, newest-of-ties
     ///   tx (what eviction targets first).
-    by_priority: BTreeMap<(Hash256, u64), Hash256>,
+    by_priority: BTreeMap<(Reverse<u64>, u64), Hash256>,
     /// Monotonic counter; incremented on every successful `add`.
     arrival_seq: u64,
     /// Sum of `entry.bytes` across `entries`.  Compared against
@@ -137,7 +141,7 @@ impl Mempool {
     /// - If `tx` is already in the pool, returns `Ok(())` silently
     ///   (idempotent — networks relay duplicates).
     /// - If inserting `tx` would exceed `max_bytes`, evicts
-    ///   lowest-priority entries (highest `pow_hash`, newest
+    ///   lowest-priority entries (lowest `tx.pow_priority`, newest
     ///   `arrival_seq` on ties) until `tx` fits.  If `tx` itself
     ///   would be the lowest-priority entry and there's no room,
     ///   returns [`Error::MempoolFull`] without evicting anything.
@@ -155,10 +159,10 @@ impl Mempool {
             });
         }
 
-        let pow_hash = tx_pow_hash(&tx);
+        let priority = tx.pow_priority.max(1);
         self.arrival_seq = self.arrival_seq.wrapping_add(1);
         let arrival_seq = self.arrival_seq;
-        let new_key = (pow_hash, arrival_seq);
+        let new_key = (Reverse(priority), arrival_seq);
 
         // Evict lowest-priority entries until `tx` fits.  If `tx`
         // itself has the worst priority, we refuse rather than
@@ -178,7 +182,10 @@ impl Mempool {
                 }
             };
             if worst_key <= new_key {
-                // New tx is (or ties with) the worst.  Refuse.
+                // New tx is (or ties with) the worst.  Refuse —
+                // `worst_key <= new_key` under the Reverse-priority
+                // key means worst has priority >= new's and was at
+                // least as early in arrival.
                 return Err(Error::MempoolFull);
             }
             // Evict the current worst and loop.
@@ -199,7 +206,7 @@ impl Mempool {
             MempoolEntry {
                 tx,
                 bytes,
-                pow_hash,
+                priority,
                 arrival_seq,
             },
         );
@@ -213,7 +220,7 @@ impl Mempool {
     pub fn remove(&mut self, txid: &Hash256) -> Option<Transaction> {
         let entry = self.entries.remove(txid)?;
         self.by_priority
-            .remove(&(entry.pow_hash, entry.arrival_seq));
+            .remove(&(Reverse(entry.priority), entry.arrival_seq));
         self.total_bytes -= entry.bytes;
         Some(entry.tx)
     }
@@ -349,32 +356,27 @@ mod tests {
     }
 
     #[test]
-    fn take_for_block_drains_best_priority_first() {
-        // Under the test-only tx-PoW target (1 leading zero byte),
-        // two txs mined at the minimum typically have differing
-        // pow_hash values.  Mine both and sort by hash to predict
-        // the order `take_for_block` will emit them.
+    fn take_for_block_drains_highest_priority_first() {
+        // Two txs with different declared priorities.  Higher
+        // priority must come out first regardless of arrival order,
+        // and this is deterministic — not probabilistic.
         let mut pool = Mempool::new(LARGE_CAP);
-        let mut a = sample_tx(0x01, 0, 0);
-        crate::tx_pow::mine_tx_pow(&mut a);
-        let a_hash = tx_pow_hash(&a);
-        let mut b = sample_tx(0x02, 0, 0);
-        crate::tx_pow::mine_tx_pow(&mut b);
-        let b_hash = tx_pow_hash(&b);
+        let mut low = sample_tx(0x01, 0, 0);
+        // Add `low` first (earlier arrival) but at priority 1.
+        crate::tx_pow::mine_tx_pow_with_priority(&mut low, 1);
+        let mut high = sample_tx(0x02, 0, 0);
+        // Add `high` second (later arrival) at priority 3.
+        crate::tx_pow::mine_tx_pow_with_priority(&mut high, 3);
 
-        pool.add(a.clone()).unwrap();
-        pool.add(b.clone()).unwrap();
+        pool.add(low.clone()).unwrap();
+        pool.add(high.clone()).unwrap();
 
         let batch = pool.take_for_block(LARGE_CAP);
         assert_eq!(batch.len(), 2);
-        // The tx with lower pow_hash must come out first.
-        let (expected_first, expected_second) = if a_hash < b_hash {
-            (a.txid(), b.txid())
-        } else {
-            (b.txid(), a.txid())
-        };
-        assert_eq!(batch[0].txid(), expected_first);
-        assert_eq!(batch[1].txid(), expected_second);
+        // Despite arriving later, `high` wins because priority
+        // beats arrival order.
+        assert_eq!(batch[0].txid(), high.txid());
+        assert_eq!(batch[1].txid(), low.txid());
         assert!(pool.is_empty());
     }
 
@@ -398,81 +400,67 @@ mod tests {
 
     #[test]
     fn eviction_rejects_new_tx_when_pool_full_and_new_is_worst() {
-        // Build a pool at the edge of capacity: one tx fills it.
-        // Then try to add a second tx — capacity is exceeded, the
-        // eviction loop compares priorities, and if the existing
-        // tx is strictly better (lower pow_hash OR equal hash but
-        // earlier arrival_seq) the new one is refused with
-        // `MempoolFull`.
-        let first = {
-            let mut t = sample_tx(0x01, 0, 1);
-            crate::tx_pow::mine_tx_pow(&mut t);
-            t
-        };
-        let first_bytes = encoding::to_bytes(&first).unwrap().len();
+        // Build a pool sized to hold ~one signed tx (250 bytes
+        // covers the ~170-byte variance comfortably; two txs won't
+        // fit).  A second tx at **equal priority** (both default
+        // to 1) loses the tiebreaker because it arrives later, and
+        // is refused with `MempoolFull` — the first tx is not
+        // evicted to make room for an equivalent one.
+        let cap = 250;
+        let mut first = sample_tx(0x01, 0, 1);
+        crate::tx_pow::mine_tx_pow(&mut first);
 
-        let mut pool = Mempool::new(first_bytes);
-        pool.add(first.clone()).expect("first fits exactly");
+        let mut pool = Mempool::new(cap);
+        pool.add(first.clone()).expect("first fits");
         assert_eq!(pool.len(), 1);
 
-        // Any second tx would bump `total_bytes` over the cap and
-        // must compete on priority.  Since arrival_seq is strictly
-        // increasing, the existing tx always wins ties — even an
-        // identically-mined sibling cannot displace it.
         let mut second = sample_tx(0x02, 0, 2);
         crate::tx_pow::mine_tx_pow(&mut second);
-        let result = pool.add(second);
+        let err = pool.add(second).unwrap_err();
+        assert!(matches!(err, Error::MempoolFull), "got {err:?}");
+        assert!(pool.contains(&first.txid()));
+        assert_eq!(pool.len(), 1);
+    }
 
-        // At least one of two things is true:
-        // - second had a strictly-worse pow_hash → rejected as
-        //   MempoolFull,
-        // - or second had a better pow_hash → first was evicted,
-        //   pool still has one tx.
-        // Either outcome preserves the size-cap invariant.
-        match result {
-            Ok(()) => {
-                assert_eq!(pool.len(), 1);
-                assert!(pool.total_bytes() <= pool.max_bytes());
-            }
-            Err(Error::MempoolFull) => {
-                assert!(pool.contains(&first.txid()));
-                assert_eq!(pool.len(), 1);
-            }
-            Err(e) => panic!("unexpected error: {e:?}"),
-        }
+    #[test]
+    fn higher_priority_tx_evicts_lower_when_pool_full() {
+        // The flip side: a new tx with strictly higher priority
+        // displaces the existing lower-priority one to make room.
+        let cap = 250;
+        let mut first = sample_tx(0x01, 0, 1);
+        crate::tx_pow::mine_tx_pow_with_priority(&mut first, 1);
+
+        let mut pool = Mempool::new(cap);
+        pool.add(first.clone()).expect("first fits");
+
+        let mut second = sample_tx(0x02, 0, 2);
+        crate::tx_pow::mine_tx_pow_with_priority(&mut second, 5);
+        pool.add(second.clone()).expect("second displaces first");
+
+        // First was evicted; only second remains.
+        assert!(!pool.contains(&first.txid()));
+        assert!(pool.contains(&second.txid()));
+        assert_eq!(pool.len(), 1);
     }
 
     #[test]
     fn older_tx_wins_tie_on_equal_priority() {
-        // Two txs with the same pow_hash (impossible in practice
-        // outside of crafted collisions, but easy to simulate by
-        // inserting and then manipulating).  We rely on the
-        // primary tiebreaker instead: arrival_seq ascending.
-        //
-        // Add tx A, then tx B.  B must appear AFTER A in the
-        // priority map because A was inserted first (lower
-        // arrival_seq).  take_for_block therefore emits A first.
+        // Two txs mined at the **same declared priority** (both 1).
+        // Arrival order must deterministically break the tie —
+        // the tx added first goes out of `take_for_block` first.
         let mut a = sample_tx(0x01, 0, 10);
-        crate::tx_pow::mine_tx_pow(&mut a);
+        crate::tx_pow::mine_tx_pow_with_priority(&mut a, 1);
         let mut b = sample_tx(0x02, 0, 20);
-        crate::tx_pow::mine_tx_pow(&mut b);
+        crate::tx_pow::mine_tx_pow_with_priority(&mut b, 1);
 
-        // Only run the tie-check if the two naturally happen to
-        // share a pow_hash prefix that orders A < B already; in
-        // the general case we use arrival to confirm determinism
-        // on same-difficulty (same-leading-zero-count) mining.
         let mut pool = Mempool::new(LARGE_CAP);
         pool.add(a.clone()).unwrap();
         pool.add(b.clone()).unwrap();
 
         let batch = pool.take_for_block(LARGE_CAP);
-        // Whichever pow_hash is smaller comes first.  If they
-        // happen to be equal (vanishingly unlikely), arrival_seq
-        // of A wins.
-        let a_hash = tx_pow_hash(&a);
-        let b_hash = tx_pow_hash(&b);
-        let first = if a_hash <= b_hash { a.txid() } else { b.txid() };
-        assert_eq!(batch[0].txid(), first);
+        // A arrived first, so A comes first regardless of hash.
+        assert_eq!(batch[0].txid(), a.txid());
+        assert_eq!(batch[1].txid(), b.txid());
     }
 
     #[test]
