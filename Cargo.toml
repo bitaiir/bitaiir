@@ -101,6 +101,16 @@ tokio = { version = "1", features = ["full"] }
 # JSON-RPC server and client.
 jsonrpsee = { version = "0.24", features = ["server", "http-client", "macros"] }
 
+# Tower middleware layers — HTTP Basic auth on the RPC server.
+# jsonrpsee 0.24 uses tower 0.4 internally, so we pin to match or
+# the `ServiceBuilder` types won't unify with `set_http_middleware`.
+tower = "0.4"
+tower-http = { version = "0.5", features = ["auth"] }
+http = "1"
+
+# CIDR/IP-network parsing for the `rpc.allow_ip` allowlist.
+ipnet = "2"
+
 # CLI argument parsing.
 clap = { version = "4", features = ["derive"] }
 

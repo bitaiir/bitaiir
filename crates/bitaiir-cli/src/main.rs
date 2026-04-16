@@ -3,13 +3,18 @@
 //! Sends JSON-RPC requests to a running `bitaiird` and prints the
 //! response. Every subcommand maps 1:1 to an RPC method.
 
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::rpc_params;
+use std::path::PathBuf;
 
 const DEFAULT_MAINNET_RPC_URL: &str = "http://127.0.0.1:8443";
 const DEFAULT_TESTNET_RPC_URL: &str = "http://127.0.0.1:18443";
+const DEFAULT_MAINNET_DATA_DIR: &str = "bitaiir_data";
+const DEFAULT_TESTNET_DATA_DIR: &str = "bitaiir_testnet_data";
+const COOKIE_FILENAME: &str = ".cookie";
 
 /// Full validation of a BitAiir address: prefix + base58check + length.
 fn is_valid_address(addr: &str) -> bool {
@@ -40,8 +45,57 @@ struct Cli {
     #[arg(long, global = true)]
     testnet: bool,
 
+    /// Explicit RPC username.  Required when the daemon uses
+    /// config-based auth (`[rpc] user = "..."` in `bitaiir.toml`).
+    /// Ignored when the daemon writes a cookie file — the CLI
+    /// reads the cookie automatically.
+    #[arg(long, global = true)]
+    rpc_user: Option<String>,
+
+    /// Explicit RPC password.  Paired with `--rpc-user`.
+    #[arg(long, global = true)]
+    rpc_password: Option<String>,
+
+    /// Override where the CLI looks for the `.cookie` file.  By
+    /// default uses `bitaiir_data/` (mainnet) or
+    /// `bitaiir_testnet_data/` (when `--testnet` is given).
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Build the `Authorization: Basic <b64>` value the daemon expects.
+/// Tries explicit credentials first, falls back to reading the
+/// cookie file from the resolved data dir.
+fn resolve_basic_token(cli: &Cli) -> String {
+    if let (Some(user), Some(pass)) = (&cli.rpc_user, &cli.rpc_password) {
+        return base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+    }
+
+    let data_dir = cli.data_dir.clone().unwrap_or_else(|| {
+        PathBuf::from(if cli.testnet {
+            DEFAULT_TESTNET_DATA_DIR
+        } else {
+            DEFAULT_MAINNET_DATA_DIR
+        })
+    });
+    let cookie_path = data_dir.join(COOKIE_FILENAME);
+    let contents = match std::fs::read_to_string(&cookie_path) {
+        Ok(c) => c.trim().to_string(),
+        Err(e) => {
+            eprintln!(
+                "Error: cannot read RPC cookie at {}: {e}\n\
+                 Pass --rpc-user and --rpc-password explicitly if the \
+                 daemon is using config-based auth, or --data-dir to \
+                 point at the daemon's data directory.",
+                cookie_path.display(),
+            );
+            std::process::exit(1);
+        }
+    };
+    base64::engine::general_purpose::STANDARD.encode(contents)
 }
 
 #[derive(Subcommand)]
@@ -148,7 +202,15 @@ async fn main() {
         }
     });
 
+    let basic_token = resolve_basic_token(&cli);
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_str(&format!("Basic {basic_token}"))
+            .expect("base64 token is ASCII"),
+    );
     let client = HttpClientBuilder::default()
+        .set_headers(headers)
         .build(&rpc_url)
         .unwrap_or_else(|e| {
             eprintln!("Error: cannot connect to {rpc_url}: {e}");

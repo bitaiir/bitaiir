@@ -32,6 +32,7 @@ use tracing::{info, warn};
 
 mod config;
 mod peer_manager;
+mod rpc_auth;
 mod tui;
 
 #[derive(Parser)]
@@ -181,16 +182,25 @@ async fn main() {
             .init();
     }
 
+    // Collect startup banner lines — printed to console in daemon
+    // mode and flushed to the TUI log channel in interactive mode
+    // so they appear inside the TUI box on startup.  Lines that
+    // depend on later resolution (RPC auth, allow_ip) are pushed
+    // further down when their values become available.
+    let mut startup_msgs: Vec<String> = vec![
+        String::new(),
+        "  BitAiir Core v0.1.0".to_string(),
+        format!("  Network:    {}", network.name()),
+        "  Proof of Aiir (SHA-256d + Argon2id)".to_string(),
+        "  Target block time: 5s | Retarget every 20 blocks".to_string(),
+        format!("  P2P server: {}", args.p2p_addr),
+        format!("  Data dir:   {}/", args.data_dir),
+    ];
+
     if !args.interactive {
-        println!();
-        println!("  BitAiir Core v0.1.0");
-        println!("  Network:    {}", network.name());
-        println!("  Proof of Aiir (SHA-256d + Argon2id)");
-        println!("  Target block time: 5s | Retarget every 20 blocks");
-        println!("  RPC server: http://{}", args.rpc_addr);
-        println!("  P2P server: {}", args.p2p_addr);
-        println!("  Data dir:   {}/", args.data_dir);
-        println!();
+        for msg in &startup_msgs {
+            println!("{msg}");
+        }
     }
 
     // --- Open storage ---------------------------------------------------- //
@@ -442,6 +452,29 @@ async fn main() {
         None
     };
 
+    // --- Resolve RPC credentials ----------------------------------------- //
+    //
+    // Cookie file at `<data_dir>/.cookie` unless the operator put
+    // explicit `user`/`password` in `bitaiir.toml`.  Either way,
+    // every RPC call must carry an `Authorization: Basic <b64>`
+    // header matching these credentials.
+    let rpc_creds = rpc_auth::resolve_credentials(
+        std::path::Path::new(&args.data_dir),
+        cfg.rpc.user.as_deref(),
+        cfg.rpc.password.as_deref(),
+    )
+    .expect("failed to prepare RPC credentials");
+    match &rpc_creds.cookie_path {
+        Some(path) => {
+            startup_msgs.push(format!("  RPC auth:   cookie ({})", path.display()));
+            info!("RPC cookie written to {}", path.display());
+        }
+        None => {
+            startup_msgs.push("  RPC auth:   config credentials (rpc.user)".to_string());
+            info!("RPC auth using rpc.user/rpc.password from config");
+        }
+    }
+
     // --- Start RPC server ------------------------------------------------ //
 
     let rpc_impl = BitaiirRpcImpl {
@@ -452,13 +485,121 @@ async fn main() {
         events: events_sender.clone(),
     };
 
+    // HTTP Basic auth middleware: every request must carry the
+    // resolved credentials; anything else is rejected with 401.
+    let auth_layer = tower_http::validate_request::ValidateRequestHeaderLayer::basic(
+        &rpc_creds.user,
+        &rpc_creds.password,
+    );
+    let http_middleware = tower::ServiceBuilder::new().layer(auth_layer);
+
+    // If `rpc.allow_ip` is set, jsonrpsee binds on a random
+    // loopback port and a filtering TCP proxy binds on the
+    // configured public address.  Connections from IPs not in the
+    // allowlist are silently dropped before auth is even attempted.
+    // If allow_ip is unset, jsonrpsee binds directly on the
+    // configured address (no proxy overhead).
+    let allow_nets: Option<Vec<ipnet::IpNet>> = cfg.rpc.allow_ip.as_ref().map(|list| {
+        list.iter()
+            .filter_map(|s| {
+                s.parse::<ipnet::IpNet>()
+                    .or_else(|_| {
+                        // Bare IPs like "127.0.0.1" don't parse as
+                        // IpNet directly — wrap in /32 or /128.
+                        s.parse::<std::net::IpAddr>().map(ipnet::IpNet::from)
+                    })
+                    .map_err(|e| {
+                        warn!("ignoring invalid allow_ip entry '{s}': {e}");
+                        e
+                    })
+                    .ok()
+            })
+            .collect()
+    });
+
+    let rpc_bind_addr = if allow_nets.is_some() {
+        "127.0.0.1:0".to_string()
+    } else {
+        args.rpc_addr.clone()
+    };
+
     let server = ServerBuilder::default()
-        .build(&args.rpc_addr)
+        .set_http_middleware(http_middleware)
+        .build(&rpc_bind_addr)
         .await
         .expect("failed to bind RPC server");
 
+    let rpc_local_addr = server.local_addr().expect("server has a local addr");
     let rpc_handle = server.start(rpc_impl.into_rpc());
-    info!("RPC server listening on http://{}", args.rpc_addr);
+
+    // Spawn the IP-filtering TCP proxy if allow_ip is configured.
+    if let Some(nets) = allow_nets {
+        let public_addr = args.rpc_addr.clone();
+        let internal = rpc_local_addr;
+        let rule_count = nets.len();
+        let net_strs: Vec<String> = nets.iter().map(ToString::to_string).collect();
+        startup_msgs.push(format!(
+            "  RPC allow:  {} rule(s): {}",
+            rule_count,
+            net_strs.join(", ")
+        ));
+        let proxy_events = events_sender.clone();
+        tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind(&public_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("  RPC allow_ip proxy: failed to bind {public_addr}: {e}");
+                    return;
+                }
+            };
+            loop {
+                match listener.accept().await {
+                    Ok((mut client, addr)) => {
+                        if !nets.iter().any(|net| net.contains(&addr.ip())) {
+                            if let Some(ev) = &proxy_events {
+                                let _ = ev.send(format!(
+                                    "  RPC: rejected connection from {addr} (not in allow_ip)"
+                                ));
+                            }
+                            continue;
+                        }
+                        tokio::spawn(async move {
+                            if let Ok(mut upstream) = tokio::net::TcpStream::connect(internal).await
+                            {
+                                let _ =
+                                    tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        if let Some(ev) = &proxy_events {
+                            let _ = ev.send(format!("  RPC proxy accept error: {e}"));
+                        }
+                    }
+                }
+            }
+        });
+        startup_msgs.push(format!(
+            "  RPC server: http://{} (IP-filtered)",
+            args.rpc_addr
+        ));
+    } else {
+        startup_msgs.push(format!("  RPC server: http://{}", args.rpc_addr));
+    }
+
+    // Print the remaining startup lines to console in daemon mode;
+    // flush all of them into the TUI log channel in interactive mode.
+    if !args.interactive {
+        for msg in startup_msgs.iter().skip(7) {
+            println!("{msg}");
+        }
+        println!();
+    } else {
+        startup_msgs.push(String::new());
+        for msg in &startup_msgs {
+            let _ = log_tx.send(msg.clone());
+        }
+    }
 
     // --- Start P2P listener ---------------------------------------------- //
     //
@@ -777,10 +918,17 @@ async fn main() {
         let repl_rpc_addr = args.rpc_addr.clone();
         let repl_shutdown = shutdown.clone();
         let repl_log_tx = log_tx.clone();
+        let repl_basic_token = rpc_creds.basic_token();
         let _ = tokio::task::spawn_blocking(move || {
             // Wait for RPC server to be ready.
             std::thread::sleep(std::time::Duration::from_millis(500));
-            if let Err(e) = tui::run_repl(&repl_rpc_addr, repl_log_tx, log_rx, repl_shutdown) {
+            if let Err(e) = tui::run_repl(
+                &repl_rpc_addr,
+                &repl_basic_token,
+                repl_log_tx,
+                log_rx,
+                repl_shutdown,
+            ) {
                 eprintln!("REPL error: {e}");
             }
         })
@@ -798,6 +946,19 @@ async fn main() {
     info!("Shutting down...");
     rpc_handle.stop().expect("rpc handle stop");
     let _ = mining_handle.await;
+
+    // Best-effort: remove the cookie file we wrote at startup so
+    // stale credentials don't linger.  On crash the next daemon
+    // startup just overwrites.
+    if let Some(cookie_path) = &rpc_creds.cookie_path {
+        if let Err(e) = rpc_auth::clear_cookie(cookie_path) {
+            warn!(
+                "failed to remove cookie file {}: {e}",
+                cookie_path.display()
+            );
+        }
+    }
+
     info!("Goodbye.");
 }
 
