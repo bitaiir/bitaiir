@@ -170,7 +170,7 @@ impl PeerManager {
                 .collect();
 
             // Sort: manual first, then most-recently-seen.
-            cands.sort_by(|a, b| a.1.cmp(&b.1));
+            cands.sort_by_key(|a| a.1);
             (outbound, cands)
         };
 

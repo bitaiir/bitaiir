@@ -499,11 +499,9 @@ fn thumb_range(scroll_offset: usize, total: usize, height: usize) -> (usize, usi
     }
     let thumb_size = ((height * height) / total).max(1);
     let max_scroll = total - height;
-    let thumb_start = if max_scroll > 0 {
-        (scroll_offset * (height.saturating_sub(thumb_size))) / max_scroll
-    } else {
-        0
-    };
+    let thumb_start = (scroll_offset * (height.saturating_sub(thumb_size)))
+        .checked_div(max_scroll)
+        .unwrap_or(0);
     let thumb_end = (thumb_start + thumb_size).min(height);
     (thumb_start, thumb_end)
 }
@@ -1337,27 +1335,23 @@ fn handle_key(
                 }
             }
         }
-        KeyCode::Left => {
-            if app.cursor > 0 {
-                let prev = app.input[..app.cursor]
-                    .chars()
-                    .last()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(0);
-                app.cursor -= prev;
-                app.dirty = true;
-            }
+        KeyCode::Left if app.cursor > 0 => {
+            let prev = app.input[..app.cursor]
+                .chars()
+                .last()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            app.cursor -= prev;
+            app.dirty = true;
         }
-        KeyCode::Right => {
-            if app.cursor < app.input.len() {
-                let next = app.input[app.cursor..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(0);
-                app.cursor += next;
-                app.dirty = true;
-            }
+        KeyCode::Right if app.cursor < app.input.len() => {
+            let next = app.input[app.cursor..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            app.cursor += next;
+            app.dirty = true;
         }
         KeyCode::Home => {
             app.cursor = 0;
@@ -1369,16 +1363,14 @@ fn handle_key(
         }
 
         // --- Command history ----------------------------------------- //
-        KeyCode::Up => {
-            if !app.history.is_empty() {
-                let idx = match app.history_idx {
-                    Some(i) if i > 0 => i - 1,
-                    Some(i) => i,
-                    None => app.history.len() - 1,
-                };
-                app.history_idx = Some(idx);
-                app.set_input(app.history[idx].clone());
-            }
+        KeyCode::Up if !app.history.is_empty() => {
+            let idx = match app.history_idx {
+                Some(i) if i > 0 => i - 1,
+                Some(i) => i,
+                None => app.history.len() - 1,
+            };
+            app.history_idx = Some(idx);
+            app.set_input(app.history[idx].clone());
         }
         KeyCode::Down => {
             if let Some(idx) = app.history_idx {
