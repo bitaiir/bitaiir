@@ -43,8 +43,32 @@
 [mempool]
 # Maximum total serialized bytes held in the mempool before
 # eviction kicks in.  When a new transaction arrives and the pool
-# is at capacity, the lowest-priority transaction (highest tx-PoW
-# hash, then newest arrival on ties) is evicted to make room.  If
-# the incoming transaction itself would be the lowest-priority,
-# it is rejected instead.  Default: 50 MB (50000000 bytes).
+# is at capacity, the lowest-priority transaction (lowest
+# pow_priority, then newest arrival on ties) is evicted to make
+# room.  If the incoming transaction itself would be the lowest-
+# priority, it is rejected instead.  Default: 50 MB.
 # max_bytes = 50000000
+
+[rpc]
+# Authentication for the JSON-RPC server.
+#
+# By default the daemon writes a random cookie to
+# `<data_dir>/.cookie` on startup.  `bitaiir-cli` on the same
+# machine reads that cookie automatically — no config needed for
+# local use.
+#
+# Set explicit credentials below to use config-based auth instead.
+# When both `user` and `password` are set, the cookie file is NOT
+# generated; clients must pass `--rpc-user` / `--rpc-password`
+# explicitly.  Useful when exposing RPC over a LAN or reverse proxy.
+#
+# user = "bitaiir"
+# password = "change-me"
+#
+# IP allowlist.  When set, only connections from these IPs or CIDR
+# ranges reach the RPC server.  All other IPs are dropped at the
+# TCP level before authentication is even attempted.
+# Leave unset (or empty) to accept connections from any IP (auth
+# is still enforced regardless).
+#
+# allow_ip = ["127.0.0.1", "192.168.1.0/24"]

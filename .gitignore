@@ -148,6 +148,11 @@ bitaiir_testnet_data/
 data_a/
 data_b/
 
+# RPC auth cookie files (never committed — machine-local, per-startup)
+.cookie
+*/.cookie
+**/.cookie
+
 # Local config file (bitaiir.toml.example is tracked instead)
 bitaiir.toml
 

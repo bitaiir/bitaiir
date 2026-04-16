@@ -1025,13 +1025,24 @@ fn handle_mouse_up(app: &mut App) {
 
 pub fn run_repl(
     rpc_addr: &str,
+    rpc_basic_token: &str,
     log_tx: std::sync::mpsc::Sender<String>,
     log_rx: Receiver<String>,
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let rt = tokio::runtime::Handle::current();
     let url = format!("http://{rpc_addr}");
+    // Attach HTTP Basic auth to every request — the RPC server's
+    // middleware rejects anything else with 401.  `rpc_basic_token`
+    // is already base64-encoded `user:password`.
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_str(&format!("Basic {rpc_basic_token}"))
+            .expect("base64 token is ASCII"),
+    );
     let client = jsonrpsee::http_client::HttpClientBuilder::default()
+        .set_headers(headers)
         .build(&url)
         .expect("build RPC client");
 

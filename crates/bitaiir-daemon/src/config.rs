@@ -25,6 +25,8 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub mempool: MempoolConfig,
+    #[serde(default)]
+    pub rpc: RpcConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -56,6 +58,27 @@ pub struct MempoolConfig {
     /// [`bitaiir_chain::consensus::DEFAULT_MAX_MEMPOOL_BYTES`]
     /// (50 MB) when unset.
     pub max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct RpcConfig {
+    /// Explicit RPC user name.  If both `user` and `password` are
+    /// set, the daemon authenticates clients with HTTP Basic auth
+    /// against these credentials and does NOT generate a cookie
+    /// file.  Useful when the RPC port is exposed on a LAN or
+    /// behind a reverse proxy — the same credentials must be
+    /// reachable by the client (e.g. passed to `bitaiir-cli` via
+    /// `--rpc-user` and `--rpc-password`).
+    pub user: Option<String>,
+    /// Explicit RPC password.  Paired with `user`; see above.
+    pub password: Option<String>,
+    /// IP allowlist for incoming RPC connections.  Each entry is a
+    /// single IP or a CIDR block (e.g. `"127.0.0.1"`,
+    /// `"192.168.1.0/24"`).  When set, only connections from
+    /// matching IPs are proxied to the JSON-RPC server; all others
+    /// are silently dropped at the TCP level.  When unset, any IP
+    /// can reach the RPC server (auth is still enforced).
+    pub allow_ip: Option<Vec<String>>,
 }
 
 // -------------------------------------------------------------------------
@@ -139,6 +162,22 @@ pub fn write_default_config(path: &Path) {
                                      # txs (higher tx-PoW hash, later
                                      # arrival) are evicted first when
                                      # the pool is full.
+
+[rpc]
+# By default the daemon writes a random cookie to
+# `<data_dir>/.cookie` on startup.  `bitaiir-cli` on the same
+# machine reads that cookie automatically — no config needed.
+# Set explicit credentials here to expose RPC on a LAN; the
+# cookie file is then NOT generated and clients must pass
+# `--rpc-user` / `--rpc-password`.
+# user = "bitaiir"
+# password = "change-me"
+
+# IP allowlist — if set, only connections from these IPs or CIDR
+# ranges reach the RPC server.  All other IPs are dropped at the
+# TCP level before authentication is even attempted.  Leave unset
+# (or empty) to accept any IP (auth is still enforced).
+# allow_ip = ["127.0.0.1", "192.168.1.0/24"]
 "#;
     let _ = std::fs::write(path, template);
 }
