@@ -575,7 +575,10 @@ async fn main() {
             }
         });
         log::log_info(
-            &format!("RPC server listening on http://{} (IP-filtered)", args.rpc_addr),
+            &format!(
+                "RPC server listening on http://{} (IP-filtered)",
+                args.rpc_addr
+            ),
             ev,
         );
     } else {
@@ -702,7 +705,11 @@ async fn main() {
     // --- Mining in background thread ------------------------------------- //
 
     if !args.mine {
-        let hint = if args.interactive { "/mine-start" } else { "--mine" };
+        let hint = if args.interactive {
+            "/mine-start"
+        } else {
+            "--mine"
+        };
         log::log_info(&format!("Mining disabled (use {hint} to enable)"), ev);
     }
 
