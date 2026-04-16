@@ -219,17 +219,13 @@ async fn main() {
 
     // Validate parameters before sending to the daemon.
     match &cli.command {
-        Commands::Getbalance { address } => {
-            if !is_valid_address(address) {
-                eprintln!("Error: '{}' is not a valid BitAiir address.", address);
-                std::process::exit(1);
-            }
+        Commands::Getbalance { address } if !is_valid_address(address) => {
+            eprintln!("Error: '{}' is not a valid BitAiir address.", address);
+            std::process::exit(1);
         }
-        Commands::Gettransactionhistory { address } => {
-            if !is_valid_address(address) {
-                eprintln!("Error: '{}' is not a valid BitAiir address.", address);
-                std::process::exit(1);
-            }
+        Commands::Gettransactionhistory { address } if !is_valid_address(address) => {
+            eprintln!("Error: '{}' is not a valid BitAiir address.", address);
+            std::process::exit(1);
         }
         Commands::Sendtoaddress {
             address, amount, ..
@@ -243,11 +239,9 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Addpeer { addr } => {
-            if !addr.contains(':') {
-                eprintln!("Error: '{}' needs a port. Example: 127.0.0.1:8444", addr);
-                std::process::exit(1);
-            }
+        Commands::Addpeer { addr } if !addr.contains(':') => {
+            eprintln!("Error: '{}' needs a port. Example: 127.0.0.1:8444", addr);
+            std::process::exit(1);
         }
         _ => {}
     }

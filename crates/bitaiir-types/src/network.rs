@@ -133,7 +133,7 @@ impl Network {
             Self::Mainnet => {
                 "Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos"
             }
-            Self::Testnet => "BitAiir Testnet Genesis — not for production use",
+            Self::Testnet => "BitAiir Testnet Genesis",
         }
     }
 }
