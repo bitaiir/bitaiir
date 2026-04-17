@@ -78,6 +78,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("encryptwallet", "Encrypt wallet with passphrase"),
     ("walletpassphrase", "Unlock wallet for N seconds"),
     ("walletlock", "Lock wallet immediately"),
+    ("getmnemonic", "Show HD seed phrase (24 words)"),
+    ("importmnemonic", "Restore wallet from seed phrase"),
     ("stop", "Stop the daemon"),
     ("help", "Show all commands"),
     ("exit", "Exit BitAiir"),
@@ -617,8 +619,8 @@ fn render_top_border(cols: u16) -> String {
             "─".repeat(fill)
         )
     } else {
-        // Visible prefix: "╭─── BitAiir Core v0.1.0 [testnet] " = 34 chars
-        let prefix_vis = 34;
+        // Visible prefix: "╭─── BitAiir Core v0.1.0 [testnet] " = 35 chars
+        let prefix_vis = 35;
         let fill = w.saturating_sub(prefix_vis + 1);
         format!(
             "{DIM}╭─── {BLUE}{BOLD}BitAiir Core v0.1.0{RESET}{DIM} {YELLOW}[testnet]{RESET}{DIM} {}╮{RESET}",
@@ -1585,6 +1587,11 @@ fn handle_command(
                     .await
             }
             "walletlock" => client.request("walletlock", rpc_params![]).await,
+            "getmnemonic" => client.request("getmnemonic", rpc_params![]).await,
+            "importmnemonic" => {
+                let phrase = parts[1..].join(" ");
+                client.request("importmnemonic", rpc_params![phrase]).await
+            }
             "stop" => client.request("stop", rpc_params![]).await,
             other => Ok(serde_json::json!(format!(
                 "Unknown: '/{other}'. Type /help."
