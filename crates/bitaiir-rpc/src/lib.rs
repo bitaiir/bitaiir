@@ -189,6 +189,11 @@ pub struct Wallet {
     /// lock/unlock so `listaddresses` and balance queries still work
     /// when the wallet is locked.
     all_addresses: Vec<String>,
+    /// BIP39 mnemonic for HD key derivation.  `None` for legacy
+    /// wallets created before HD support was added.
+    mnemonic: Option<bip39::Mnemonic>,
+    /// Next BIP44 child index to derive.
+    next_hd_index: u32,
 }
 
 impl Default for Wallet {
@@ -202,11 +207,64 @@ impl Wallet {
         Self {
             keys: HashMap::new(),
             all_addresses: Vec::new(),
+            mnemonic: None,
+            next_hd_index: 0,
         }
     }
 
+    /// Create a wallet with an HD mnemonic.  Derives the first
+    /// address immediately.
+    pub fn new_hd(mnemonic: bip39::Mnemonic) -> Self {
+        let mut w = Self {
+            keys: HashMap::new(),
+            all_addresses: Vec::new(),
+            mnemonic: Some(mnemonic),
+            next_hd_index: 0,
+        };
+        w.generate_address();
+        w
+    }
+
+    /// Restore a wallet from a mnemonic phrase, re-deriving
+    /// `count` addresses.
+    pub fn from_mnemonic(mnemonic: bip39::Mnemonic, count: u32) -> Self {
+        let mut w = Self {
+            keys: HashMap::new(),
+            all_addresses: Vec::new(),
+            mnemonic: Some(mnemonic),
+            next_hd_index: 0,
+        };
+        for _ in 0..count.max(1) {
+            w.generate_address();
+        }
+        w
+    }
+
+    /// The mnemonic phrase, if this is an HD wallet.
+    pub fn mnemonic(&self) -> Option<&bip39::Mnemonic> {
+        self.mnemonic.as_ref()
+    }
+
+    /// Current next HD derivation index.
+    pub fn next_hd_index(&self) -> u32 {
+        self.next_hd_index
+    }
+
     /// Generate a new keypair and return the BitAiir address.
+    /// If the wallet has an HD mnemonic, derives from BIP44 path.
+    /// Otherwise falls back to random key generation (legacy).
     pub fn generate_address(&mut self) -> String {
+        if let Some(mnemonic) = &self.mnemonic {
+            let idx = self.next_hd_index;
+            let (privkey, pubkey, addr_str, _) = bitaiir_crypto::hd::derive_keypair(mnemonic, idx);
+            self.next_hd_index = idx + 1;
+            self.keys.insert(addr_str.clone(), (privkey, pubkey));
+            if !self.all_addresses.contains(&addr_str) {
+                self.all_addresses.push(addr_str.clone());
+            }
+            return addr_str;
+        }
+        // Legacy fallback: random key.
         let privkey = PrivateKey::generate();
         let pubkey = privkey.public_key();
         let address = Address::from_compressed_public_key(&pubkey);
@@ -478,6 +536,14 @@ pub trait BitaiirApi {
     /// Lock the wallet immediately.
     #[method(name = "walletlock")]
     async fn wallet_lock(&self) -> RpcResult<String>;
+
+    /// Show the HD wallet seed phrase (24 words).
+    #[method(name = "getmnemonic")]
+    async fn get_mnemonic(&self) -> RpcResult<serde_json::Value>;
+
+    /// Restore the wallet from a BIP39 seed phrase.
+    #[method(name = "importmnemonic")]
+    async fn import_mnemonic(&self, phrase: String) -> RpcResult<serde_json::Value>;
 
     #[method(name = "stop")]
     async fn stop(&self) -> RpcResult<String>;
@@ -1949,6 +2015,59 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         state.wallet_lock_at = 0;
         self.emit("  Wallet locked.".to_string());
         Ok("wallet locked".to_string())
+    }
+
+    async fn get_mnemonic(&self) -> RpcResult<serde_json::Value> {
+        let state = self.state.read().await;
+        match state.wallet.mnemonic() {
+            Some(m) => {
+                let phrase = m.to_string();
+                let words: Vec<&str> = phrase.split_whitespace().collect();
+                let lines: Vec<String> =
+                    words.chunks(6).map(|c| c.join(" ")).collect();
+                Ok(serde_json::json!({
+                    "mnemonic": lines,
+                    "words": m.word_count(),
+                    "hd_index": state.wallet.next_hd_index(),
+                }))
+            }
+            None => Err(jsonrpsee::types::ErrorObjectOwned::owned(
+                -4,
+                "this is a legacy wallet (no HD mnemonic). Use importmnemonic to set one.",
+                None::<()>,
+            )),
+        }
+    }
+
+    async fn import_mnemonic(&self, phrase: String) -> RpcResult<serde_json::Value> {
+        let mnemonic = bitaiir_crypto::hd::parse_mnemonic(&phrase)
+            .map_err(|e| jsonrpsee::types::ErrorObjectOwned::owned(-3, e, None::<()>))?;
+
+        let mut state = self.state.write().await;
+
+        // Derive addresses — start with 1 (user can getnewaddress for more).
+        let wallet = Wallet::new_hd(mnemonic);
+        let addr = wallet.addresses().first().cloned().unwrap_or_default();
+        let hd_index = wallet.next_hd_index();
+
+        // Save the mnemonic phrase to storage metadata.
+        let _ = self.storage.set_metadata("hd_mnemonic", phrase.as_bytes());
+        let _ = self
+            .storage
+            .set_metadata("hd_index", &hd_index.to_be_bytes());
+
+        // Persist the derived key.
+        if let Some((privkey, pubkey)) = wallet.get_keys(&addr) {
+            let _ = self.storage.save_wallet_key(&addr, privkey, pubkey);
+        }
+
+        state.wallet = wallet;
+
+        Ok(serde_json::json!({
+            "status": "wallet restored from mnemonic",
+            "addresses": 1,
+            "first_address": addr,
+        }))
     }
 
     async fn stop(&self) -> RpcResult<String> {

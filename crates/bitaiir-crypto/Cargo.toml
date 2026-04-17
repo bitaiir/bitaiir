@@ -27,6 +27,10 @@ bs58 = { workspace = true }
 # public-key recovery used by the signed-message protocol.
 secp256k1 = { workspace = true }
 
+# BIP39 mnemonic + BIP32 HD key derivation.
+bip39 = { workspace = true }
+bip32 = { workspace = true }
+
 # Base64 for the signed-message wire format (Bitcoin convention).
 base64 = { workspace = true }
 

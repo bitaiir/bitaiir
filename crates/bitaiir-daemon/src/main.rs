@@ -243,7 +243,40 @@ async fn main() {
 
             // Load wallet keys.
             let wallet_keys = storage.load_wallet_keys().expect("load wallet keys");
-            let mut wallet = Wallet::new();
+
+            // Restore HD mnemonic if one was persisted.
+            let stored_mnemonic = storage
+                .get_metadata("hd_mnemonic")
+                .ok()
+                .flatten()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .and_then(|phrase| bitaiir_crypto::hd::parse_mnemonic(&phrase).ok());
+            let stored_hd_index = storage
+                .get_metadata("hd_index")
+                .ok()
+                .flatten()
+                .and_then(|b| b.try_into().ok())
+                .map(u32::from_be_bytes)
+                .unwrap_or(0);
+
+            let mut wallet = if let Some(mnemonic) = stored_mnemonic {
+                let mut w = Wallet::from_mnemonic(mnemonic, stored_hd_index);
+                // Also import any extra keys that were loaded from
+                // storage (e.g. imported via importprivkey) beyond
+                // the HD-derived ones.
+                for (addr, (privkey, pubkey)) in &wallet_keys {
+                    if w.get_keys(addr).is_none() {
+                        w.import_key(addr.clone(), privkey.clone(), *pubkey);
+                    }
+                }
+                log::log_info(
+                    &format!("HD wallet restored ({stored_hd_index} derived address(es))"),
+                    ev,
+                );
+                w
+            } else {
+                Wallet::new()
+            };
 
             // Check if the wallet is encrypted before trying to
             // import plaintext keys.
@@ -368,11 +401,35 @@ async fn main() {
                 .apply_block(0, &genesis, &genesis_undo)
                 .expect("persist genesis");
 
-            // Generate a miner address in the wallet for block 1+.
-            let mut wallet = Wallet::new();
-            let miner_address = wallet.generate_address();
+            // Generate a new HD wallet with a 24-word mnemonic.
+            let mnemonic = bitaiir_crypto::hd::generate_mnemonic();
+            log::print_line("", ev);
+            log::log_info("New HD wallet created (24-word mnemonic)", ev);
+            log::print_line("", ev);
+            log::print_line("  ┌──────────────────────────────────────────────────┐", ev);
+            log::print_line("  │  BACKUP YOUR SEED PHRASE — WRITE IT DOWN NOW!    │", ev);
+            log::print_line("  │  Anyone with these words can access your funds.  │", ev);
+            log::print_line("  └──────────────────────────────────────────────────┘", ev);
+            log::print_line("", ev);
+            let phrase = mnemonic.to_string();
+            let words: Vec<&str> = phrase.split_whitespace().collect();
+            for chunk in words.chunks(6) {
+                log::print_line(&format!("  {}", chunk.join(" ")), ev);
+            }
+            log::print_line("", ev);
+
+            let wallet = Wallet::new_hd(mnemonic.clone());
+            let miner_address = wallet.addresses().first().unwrap().clone();
             let (privkey, pubkey) = wallet.get_keys(&miner_address).unwrap().clone();
             let miner_hash = hash160(&pubkey.to_compressed());
+
+            // Persist mnemonic + first derived key.
+            storage
+                .set_metadata("hd_mnemonic", mnemonic.to_string().as_bytes())
+                .expect("save mnemonic");
+            storage
+                .set_metadata("hd_index", &wallet.next_hd_index().to_be_bytes())
+                .expect("save hd_index");
             storage
                 .save_wallet_key(&miner_address, &privkey, &pubkey)
                 .expect("save miner wallet key");

@@ -186,6 +186,13 @@ enum Commands {
     },
     /// Lock the wallet immediately.
     Walletlock,
+    /// Show the HD wallet seed phrase (24 words).
+    Getmnemonic,
+    /// Restore wallet from a BIP39 seed phrase.
+    Importmnemonic {
+        /// The 24-word mnemonic phrase (quoted).
+        phrase: String,
+    },
     /// Ask the daemon to shut down gracefully.
     Stop,
 }
@@ -316,6 +323,12 @@ async fn main() {
                 .await
         }
         Commands::Walletlock => client.request("walletlock", rpc_params![]).await,
+        Commands::Getmnemonic => client.request("getmnemonic", rpc_params![]).await,
+        Commands::Importmnemonic { phrase } => {
+            client
+                .request("importmnemonic", rpc_params![phrase.clone()])
+                .await
+        }
         Commands::Stop => client.request("stop", rpc_params![]).await,
     };
 

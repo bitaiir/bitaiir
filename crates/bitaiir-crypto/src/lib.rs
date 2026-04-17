@@ -24,6 +24,7 @@ pub mod address;
 pub mod base58;
 pub mod error;
 pub mod hash;
+pub mod hd;
 pub mod hmac;
 pub mod key;
 pub mod signature;
