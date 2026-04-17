@@ -2023,8 +2023,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             Some(m) => {
                 let phrase = m.to_string();
                 let words: Vec<&str> = phrase.split_whitespace().collect();
-                let lines: Vec<String> =
-                    words.chunks(6).map(|c| c.join(" ")).collect();
+                let lines: Vec<String> = words.chunks(6).map(|c| c.join(" ")).collect();
                 Ok(serde_json::json!({
                     "mnemonic": lines,
                     "words": m.word_count(),
