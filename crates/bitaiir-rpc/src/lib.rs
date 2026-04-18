@@ -53,6 +53,25 @@ pub struct NodeState {
     /// the same input and collapse into a single transaction.
     /// Cleared on background-task completion regardless of success.
     pub pending_spends: std::collections::HashSet<bitaiir_types::OutPoint>,
+    /// IPs banned for protocol misbehavior (currently only
+    /// rate-limit violations).  Loaded from
+    /// [`bitaiir_storage::Storage::load_banned_ips`] on startup and
+    /// kept in sync on every insert/remove, so bans survive
+    /// restarts.  Each entry carries a Unix deadline plus the
+    /// running offense count (used for exponential backoff on
+    /// repeat offenders).
+    pub banned_ips: std::collections::HashMap<std::net::IpAddr, BannedIp>,
+}
+
+/// Per-IP rate-limit ban record.
+#[derive(Debug, Clone, Copy)]
+pub struct BannedIp {
+    /// Unix timestamp after which the ban expires.
+    pub deadline: u64,
+    /// How many times this IP has tripped the rate limit (persists
+    /// across expirations so a repeat offender climbs the backoff
+    /// curve).
+    pub offenses: u32,
 }
 
 /// One live P2P connection.

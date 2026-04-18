@@ -48,6 +48,73 @@ const TICK_INTERVAL: Duration = Duration::from_secs(10);
 /// Default target number of outbound connections.
 const TARGET_OUTBOUND: usize = 8;
 
+// --------------------------------------------------------------------- //
+// Per-peer rate limit
+// --------------------------------------------------------------------- //
+
+/// Rate-limit parameters applied to every incoming P2P message.  A
+/// peer that exceeds the bucket is disconnected and banned for
+/// `ban_secs`.  Resolved at daemon startup from `[network]` config
+/// and reused for every gossip loop (one `TokenBucket` instance per
+/// peer).
+#[derive(Debug, Clone, Copy)]
+pub struct PeerRateLimit {
+    /// Token refill rate (messages per second).
+    pub rate_per_sec: f64,
+    /// Bucket capacity — the maximum burst before throttling kicks in.
+    pub burst: f64,
+    /// How long to ban the peer after a violation, in seconds.
+    pub ban_secs: u64,
+}
+
+impl Default for PeerRateLimit {
+    fn default() -> Self {
+        Self {
+            rate_per_sec: 100.0,
+            burst: 200.0,
+            ban_secs: 600,
+        }
+    }
+}
+
+/// Standard token bucket: fractional tokens accumulate at
+/// `rate_per_sec` up to `capacity`, each incoming message consumes
+/// one token.  Refill is computed lazily from elapsed wall time, so
+/// there's no background timer.
+pub struct TokenBucket {
+    capacity: f64,
+    rate_per_sec: f64,
+    tokens: f64,
+    last_refill: std::time::Instant,
+}
+
+impl TokenBucket {
+    pub fn new(capacity: f64, rate_per_sec: f64) -> Self {
+        Self {
+            capacity,
+            rate_per_sec,
+            tokens: capacity,
+            last_refill: std::time::Instant::now(),
+        }
+    }
+
+    /// Take one token if available.  Returns `false` when the
+    /// bucket is empty — the caller should treat that as a rate
+    /// violation.
+    pub fn try_take(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate_per_sec).min(self.capacity);
+        self.last_refill = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Hardcoded seed node IPs — last resort when the known-peer database
 /// is empty and no `--connect` was given.  Add entries as the network
 /// grows (public nodes with static IPs).
@@ -87,6 +154,7 @@ pub struct PeerManager {
     events: Option<std::sync::mpsc::Sender<String>>,
     shutdown: Arc<AtomicBool>,
     our_p2p_addr: String,
+    rate_limit: PeerRateLimit,
     /// Last time DNS seeds were resolved (0 = never).
     last_dns_resolve: std::sync::atomic::AtomicU64,
 }
@@ -98,6 +166,7 @@ impl PeerManager {
         events: Option<std::sync::mpsc::Sender<String>>,
         shutdown: Arc<AtomicBool>,
         our_p2p_addr: String,
+        rate_limit: PeerRateLimit,
     ) -> Self {
         Self {
             state,
@@ -105,6 +174,7 @@ impl PeerManager {
             events,
             shutdown,
             our_p2p_addr,
+            rate_limit,
             last_dns_resolve: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -285,6 +355,7 @@ impl PeerManager {
         let events = self.events.clone();
         let addr_owned = addr.to_string();
         let peer_best_height = their_version.best_height;
+        let rate_limit = self.rate_limit;
         tokio::spawn(async move {
             run_gossip_loop(
                 reader,
@@ -295,6 +366,7 @@ impl PeerManager {
                 events,
                 addr_owned,
                 peer_best_height,
+                rate_limit,
             )
             .await;
         });
@@ -423,7 +495,9 @@ pub async fn run_gossip_loop(
     events: Option<std::sync::mpsc::Sender<String>>,
     peer_key: String,
     peer_best_height: u64,
+    rate_limit: PeerRateLimit,
 ) {
+    let mut bucket = TokenBucket::new(rate_limit.burst, rate_limit.rate_per_sec);
     // After connection, request known addresses from the peer.
     let getaddr_msg = NetMessage::GetAddr;
     let payload = getaddr_msg.to_payload();
@@ -485,6 +559,60 @@ pub async fn run_gossip_loop(
                     NetMessage::from_payload(&header.command, &payload),
                 )
             } => {
+                // Rate-limit gate: one token per parsed message.  On
+                // violation we disconnect and ban the peer — both
+                // via `KnownPeer::ban` (persisted) if we have an
+                // entry for this addr, and via the in-memory
+                // `banned_ips` map so the IP can't reconnect until
+                // the ban expires.
+                if matches!(&result, Ok(Some(_))) && !bucket.try_take() {
+                    let peer_ip: Option<std::net::IpAddr> = peer_key
+                        .rsplit_once(':')
+                        .and_then(|(host, _)| host.trim_matches(['[', ']']).parse().ok());
+
+                    // Exponential backoff on repeat offenders: each
+                    // additional violation doubles the ban, capped at
+                    // 64× to keep bans finite (~10h at default 600s).
+                    let mut s = state.write().await;
+                    let prev = peer_ip.and_then(|ip| s.banned_ips.get(&ip).copied());
+                    let offenses = prev.map(|b| b.offenses.saturating_add(1)).unwrap_or(1);
+                    let mult: u64 = 1u64 << (offenses - 1).min(6);
+                    let ban_secs = rate_limit.ban_secs.saturating_mul(mult);
+                    let deadline = unix_now() + ban_secs;
+
+                    crate::log::log_warn(
+                        &format!(
+                            "peer {peer_key} exceeded rate limit ({} msgs/s, burst {}) — disconnecting, banning for {}s (offense #{})",
+                            rate_limit.rate_per_sec, rate_limit.burst, ban_secs, offenses,
+                        ),
+                        &events,
+                    );
+
+                    if let Some(kp) = s.known_peers.get_mut(&peer_key) {
+                        kp.banned_until = deadline;
+                        let _ = storage.save_known_peer(
+                            &peer_key,
+                            kp.last_seen,
+                            kp.consecutive_failures,
+                            kp.banned_until,
+                            kp.source_byte(),
+                        );
+                    }
+                    if let Some(ip) = peer_ip {
+                        s.banned_ips.insert(
+                            ip,
+                            bitaiir_rpc::BannedIp {
+                                deadline,
+                                offenses,
+                            },
+                        );
+                        drop(s);
+                        let _ = storage.save_banned_ip(&ip.to_string(), deadline, offenses);
+                    } else {
+                        drop(s);
+                    }
+                    break;
+                }
                 match result {
                     Ok(Some(NetMessage::GetHeaders(locator))) => {
                         // Walk the locator newest-first looking for
@@ -1244,4 +1372,41 @@ async fn handle_compact_block(
             missing_indexes,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_bucket_allows_up_to_capacity_immediately() {
+        let mut b = TokenBucket::new(5.0, 1.0);
+        for _ in 0..5 {
+            assert!(b.try_take());
+        }
+        assert!(!b.try_take());
+    }
+
+    #[test]
+    fn token_bucket_refills_at_configured_rate() {
+        let mut b = TokenBucket::new(2.0, 1000.0);
+        assert!(b.try_take());
+        assert!(b.try_take());
+        assert!(!b.try_take());
+        // 2ms at 1000 tok/s = 2 tokens refilled → capped at capacity.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(b.try_take());
+        assert!(b.try_take());
+    }
+
+    #[test]
+    fn token_bucket_never_exceeds_capacity() {
+        let mut b = TokenBucket::new(3.0, 1000.0);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // 50ms at 1000 tok/s would imply 50 tokens, but capacity is 3.
+        for _ in 0..3 {
+            assert!(b.try_take());
+        }
+        assert!(!b.try_take());
+    }
 }
