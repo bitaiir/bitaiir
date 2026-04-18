@@ -18,5 +18,7 @@ bitaiir-crypto = { workspace = true }
 clap = { workspace = true }
 http = { workspace = true }
 jsonrpsee = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
