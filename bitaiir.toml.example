@@ -72,3 +72,19 @@
 # is still enforced regardless).
 #
 # allow_ip = ["127.0.0.1", "192.168.1.0/24"]
+
+# Serve RPC over HTTPS instead of plain HTTP.  When true and no
+# explicit cert/key paths are provided, the daemon generates a
+# self-signed ECDSA P-256 pair valid for 10 years (CN = BitAiir
+# RPC, SANs = localhost + 127.0.0.1 + ::1) in
+# `<data_dir>/rpc.cert` + `<data_dir>/rpc.key` on first startup and
+# reuses it on subsequent runs.  `bitaiir-cli` auto-trusts that
+# file, so local use is zero-config.
+#
+# For LAN or public deployment, point the two paths below at a
+# cert signed by a real CA (Let's Encrypt, internal PKI, etc.) —
+# the daemon loads them as-is and does not generate anything.
+#
+# tls = false
+# tls_cert_path = "/etc/letsencrypt/live/node.example.com/fullchain.pem"
+# tls_key_path  = "/etc/letsencrypt/live/node.example.com/privkey.pem"

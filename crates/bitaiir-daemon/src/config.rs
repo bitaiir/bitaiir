@@ -79,6 +79,21 @@ pub struct RpcConfig {
     /// are silently dropped at the TCP level.  When unset, any IP
     /// can reach the RPC server (auth is still enforced).
     pub allow_ip: Option<Vec<String>>,
+    /// Serve the RPC endpoint over HTTPS instead of plain HTTP.  When
+    /// `true` and neither `tls_cert_path` nor `tls_key_path` is set,
+    /// the daemon generates a self-signed cert pair (`rpc.cert` +
+    /// `rpc.key`) in the data directory on first startup and reuses
+    /// it on subsequent runs.  When paths are provided, the daemon
+    /// loads them as-is — use this to plug in a cert signed by a real
+    /// CA (Let's Encrypt, internal PKI, etc.) for LAN / production.
+    pub tls: Option<bool>,
+    /// Path to a PEM-encoded TLS certificate (chain).  Only read when
+    /// `tls = true`.  When unset, defaults to
+    /// `<data_dir>/rpc.cert` (auto-generated on first run).
+    pub tls_cert_path: Option<String>,
+    /// Path to a PEM-encoded TLS private key.  Only read when
+    /// `tls = true`.  When unset, defaults to `<data_dir>/rpc.key`.
+    pub tls_key_path: Option<String>,
 }
 
 // -------------------------------------------------------------------------
@@ -178,6 +193,16 @@ pub fn write_default_config(path: &Path) {
 # TCP level before authentication is even attempted.  Leave unset
 # (or empty) to accept any IP (auth is still enforced).
 # allow_ip = ["127.0.0.1", "192.168.1.0/24"]
+
+# Serve RPC over HTTPS instead of plain HTTP.  When true and no
+# cert/key paths are set, the daemon generates a self-signed cert
+# (10-year validity) in `<data_dir>/rpc.cert` + `<data_dir>/rpc.key`
+# on first startup and reuses it on subsequent runs.  Point
+# `bitaiir-cli` at `https://host:port`; it auto-trusts the local
+# `rpc.cert` file.
+# tls = false
+# tls_cert_path = "/etc/letsencrypt/live/node.example.com/fullchain.pem"
+# tls_key_path  = "/etc/letsencrypt/live/node.example.com/privkey.pem"
 "#;
     let _ = std::fs::write(path, template);
 }

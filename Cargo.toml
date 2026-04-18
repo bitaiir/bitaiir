@@ -153,6 +153,18 @@ primitive-types = { version = "0.12", default-features = false, features = ["std
 # real redb database in isolation.
 tempfile = "3"
 
+# TLS for the RPC server.  `rustls` is pure Rust (no OpenSSL), matches
+# the version already pulled in by `jsonrpsee-http-client`, and works
+# cleanly on Windows / macOS / Linux / RISC-V.  We pin the `ring`
+# crypto provider (instead of the default `aws-lc-rs`) because `ring`
+# compiles on RISC-V targets without a C toolchain.  `rcgen` is used
+# to generate self-signed certs on first startup when no cert/key
+# path is configured.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
+
 # Release profile: optimize hard, strip symbols, abort on panic for smaller
 # binaries. We override this for benchmarks if/when we add them.
 [profile.release]

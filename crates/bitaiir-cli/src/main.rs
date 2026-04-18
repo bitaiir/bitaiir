@@ -6,15 +6,19 @@
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use jsonrpsee::core::client::ClientT;
-use jsonrpsee::http_client::HttpClientBuilder;
+use jsonrpsee::http_client::{CustomCertStore, HttpClientBuilder};
 use jsonrpsee::rpc_params;
+use rustls::pki_types::CertificateDer;
+use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const DEFAULT_MAINNET_RPC_URL: &str = "http://127.0.0.1:8443";
 const DEFAULT_TESTNET_RPC_URL: &str = "http://127.0.0.1:18443";
 const DEFAULT_MAINNET_DATA_DIR: &str = "bitaiir_data";
 const DEFAULT_TESTNET_DATA_DIR: &str = "bitaiir_testnet_data";
 const COOKIE_FILENAME: &str = ".cookie";
+const CERT_FILENAME: &str = "rpc.cert";
 
 /// Full validation of a BitAiir address: prefix + base58check + length.
 fn is_valid_address(addr: &str) -> bool {
@@ -62,8 +66,34 @@ struct Cli {
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
 
+    /// Path to a PEM certificate (or CA bundle) that the CLI trusts
+    /// for the RPC connection.  Only used when `--rpc-url` points at
+    /// an `https://` endpoint.  When unset, the CLI auto-loads
+    /// `<data_dir>/rpc.cert` — the cert the daemon generates on
+    /// first startup with `[rpc] tls = true`.  If neither is
+    /// present, the system trust store is consulted.
+    #[arg(long, global = true)]
+    rpc_cafile: Option<PathBuf>,
+
+    /// Disable TLS certificate verification.  DANGEROUS — anyone on
+    /// the network path can intercept or impersonate the RPC
+    /// endpoint.  Use only for debugging.
+    #[arg(long, global = true)]
+    insecure: bool,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Resolve the data dir from `--data-dir` or the network-default.
+fn resolve_data_dir(cli: &Cli) -> PathBuf {
+    cli.data_dir.clone().unwrap_or_else(|| {
+        PathBuf::from(if cli.testnet {
+            DEFAULT_TESTNET_DATA_DIR
+        } else {
+            DEFAULT_MAINNET_DATA_DIR
+        })
+    })
 }
 
 /// Build the `Authorization: Basic <b64>` value the daemon expects.
@@ -74,14 +104,7 @@ fn resolve_basic_token(cli: &Cli) -> String {
         return base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
     }
 
-    let data_dir = cli.data_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(if cli.testnet {
-            DEFAULT_TESTNET_DATA_DIR
-        } else {
-            DEFAULT_MAINNET_DATA_DIR
-        })
-    });
-    let cookie_path = data_dir.join(COOKIE_FILENAME);
+    let cookie_path = resolve_data_dir(cli).join(COOKIE_FILENAME);
     let contents = match std::fs::read_to_string(&cookie_path) {
         Ok(c) => c.trim().to_string(),
         Err(e) => {
@@ -96,6 +119,110 @@ fn resolve_basic_token(cli: &Cli) -> String {
         }
     };
     base64::engine::general_purpose::STANDARD.encode(contents)
+}
+
+/// Build an optional rustls `ClientConfig` for the RPC connection.
+///
+/// Returns `None` when the URL is plain HTTP — no TLS material
+/// needed.  Returns `Some` when the URL is HTTPS; in that case the
+/// returned config either trusts a specific CA file, accepts any
+/// cert (`--insecure`), or — the common case — trusts the daemon's
+/// auto-generated `<data_dir>/rpc.cert`.  If none of those apply,
+/// falls through to the platform verifier (system trust store).
+fn build_tls_config(cli: &Cli, rpc_url: &str) -> Option<CustomCertStore> {
+    if !rpc_url.starts_with("https://") {
+        return None;
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    if cli.insecure {
+        return Some(
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+                .with_no_client_auth(),
+        );
+    }
+
+    let cafile = cli.rpc_cafile.clone().or_else(|| {
+        let p = resolve_data_dir(cli).join(CERT_FILENAME);
+        if p.exists() { Some(p) } else { None }
+    });
+
+    let Some(cafile) = cafile else {
+        // No explicit trust material — let jsonrpsee fall back to
+        // `rustls-platform-verifier` (system trust store).
+        return None;
+    };
+
+    let pem = std::fs::read(&cafile).unwrap_or_else(|e| {
+        eprintln!("Error: cannot read TLS cert {}: {e}", cafile.display());
+        std::process::exit(1);
+    });
+
+    let mut roots = rustls::RootCertStore::empty();
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut Cursor::new(&pem))
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| {
+            eprintln!("Error: parsing {}: {e}", cafile.display());
+            std::process::exit(1);
+        });
+    if certs.is_empty() {
+        eprintln!("Error: no certificates found in {}", cafile.display());
+        std::process::exit(1);
+    }
+    for cert in certs {
+        let _ = roots.add(cert);
+    }
+
+    Some(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+}
+
+/// `--insecure` verifier: accepts every cert.  Only used when the
+/// user opts in with the CLI flag.
+#[derive(Debug)]
+struct NoCertificateVerification;
+
+impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 #[derive(Subcommand)]
@@ -216,13 +343,15 @@ async fn main() {
         http::HeaderValue::from_str(&format!("Basic {basic_token}"))
             .expect("base64 token is ASCII"),
     );
-    let client = HttpClientBuilder::default()
-        .set_headers(headers)
-        .build(&rpc_url)
-        .unwrap_or_else(|e| {
-            eprintln!("Error: cannot connect to {rpc_url}: {e}");
-            std::process::exit(1);
-        });
+
+    let mut builder = HttpClientBuilder::default().set_headers(headers);
+    if let Some(tls_cfg) = build_tls_config(&cli, &rpc_url) {
+        builder = builder.with_custom_cert_store(tls_cfg);
+    }
+    let client = builder.build(&rpc_url).unwrap_or_else(|e| {
+        eprintln!("Error: cannot connect to {rpc_url}: {e}");
+        std::process::exit(1);
+    });
 
     // Validate parameters before sending to the daemon.
     match &cli.command {
