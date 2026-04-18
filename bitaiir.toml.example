@@ -27,6 +27,17 @@
 # Peers to connect to on startup.  Same as --connect on the CLI.
 # connect = ["127.0.0.1:8544", "1.2.3.4:8444"]
 
+# Per-peer message rate limit (token bucket).  A peer sustaining
+# more than `rate_limit_msgs_per_sec` messages per second, or
+# bursting past `rate_limit_burst` in aggregate, is disconnected
+# and banned for `rate_limit_ban_secs` seconds.  The ban is
+# persisted in the known_peers table for outbound-history peers;
+# inbound-only peers are tracked in memory until restart.
+# Defaults: 100 msgs/s, burst 200, ban 600s.
+# rate_limit_msgs_per_sec = 100
+# rate_limit_burst        = 200
+# rate_limit_ban_secs     = 600
+
 [mining]
 # Start mining automatically on daemon startup (same as --mine).
 # enabled = false

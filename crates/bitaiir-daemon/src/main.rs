@@ -82,6 +82,7 @@ struct Settings {
     connect: Vec<String>,
     mining_threads: usize,
     max_mempool_bytes: usize,
+    rate_limit: peer_manager::PeerRateLimit,
 }
 
 impl Settings {
@@ -125,6 +126,21 @@ impl Settings {
             .max_bytes
             .unwrap_or_else(config::default_max_mempool_bytes);
 
+        let defaults = peer_manager::PeerRateLimit::default();
+        let rate_limit = peer_manager::PeerRateLimit {
+            rate_per_sec: cfg
+                .network
+                .rate_limit_msgs_per_sec
+                .map(f64::from)
+                .unwrap_or(defaults.rate_per_sec),
+            burst: cfg
+                .network
+                .rate_limit_burst
+                .map(f64::from)
+                .unwrap_or(defaults.burst),
+            ban_secs: cfg.network.rate_limit_ban_secs.unwrap_or(defaults.ban_secs),
+        };
+
         Self {
             rpc_addr,
             p2p_addr,
@@ -134,6 +150,7 @@ impl Settings {
             connect,
             mining_threads,
             max_mempool_bytes,
+            rate_limit,
         }
     }
 }
@@ -485,6 +502,22 @@ async fn main() {
             });
     }
 
+    // Load persisted IP bans.  Entries whose deadline has already
+    // elapsed are dropped in memory; the stale row gets cleaned
+    // from disk on the next inbound accept that hits it.
+    let mut banned_ips: std::collections::HashMap<std::net::IpAddr, bitaiir_rpc::BannedIp> =
+        std::collections::HashMap::new();
+    if let Ok(stored) = storage.load_banned_ips() {
+        let now = unix_now();
+        for (ip_str, deadline, offenses) in stored {
+            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                if deadline > now {
+                    banned_ips.insert(ip, bitaiir_rpc::BannedIp { deadline, offenses });
+                }
+            }
+        }
+    }
+
     // Check if the wallet on disk is encrypted.
     let wallet_encrypted = storage
         .get_metadata("wallet_encrypted")
@@ -506,6 +539,7 @@ async fn main() {
         wallet_unlocked: !wallet_encrypted,
         wallet_lock_at: 0,
         pending_spends: std::collections::HashSet::new(),
+        banned_ips,
     }));
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -750,6 +784,7 @@ async fn main() {
     let p2p_addr = args.p2p_addr.clone();
     let p2p_storage = storage.clone();
     let p2p_events = events_sender.clone();
+    let p2p_rate_limit = args.rate_limit;
     tokio::spawn(async move {
         let listener = match TcpListener::bind(&p2p_addr).await {
             Ok(l) => l,
@@ -762,9 +797,36 @@ async fn main() {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
+                    // Reject banned IPs before we even start the
+                    // handshake.  Lazy cleanup: if the ban has
+                    // expired, remove the entry while we're here.
+                    {
+                        let now = unix_now();
+                        let mut s = p2p_state.write().await;
+                        if let Some(entry) = s.banned_ips.get(&addr.ip()).copied() {
+                            if entry.deadline > now {
+                                log::log_warn(
+                                    &format!(
+                                        "rejecting inbound from banned IP {} (offense #{}, ban expires in {}s)",
+                                        addr.ip(),
+                                        entry.offenses,
+                                        entry.deadline - now,
+                                    ),
+                                    &p2p_events,
+                                );
+                                drop(stream);
+                                continue;
+                            }
+                            s.banned_ips.remove(&addr.ip());
+                            drop(s);
+                            let _ = p2p_storage.remove_banned_ip(&addr.ip().to_string());
+                        }
+                    }
+
                     let state = p2p_state.clone();
                     let storage = p2p_storage.clone();
                     let events = p2p_events.clone();
+                    let rate_limit = p2p_rate_limit;
                     tokio::spawn(async move {
                         let our_height = {
                             let s = state.read().await;
@@ -780,12 +842,10 @@ async fn main() {
                                 v
                             }
                             Err(e) => {
-                                warn!("inbound handshake with {addr} failed: {e}");
-                                if let Some(ev) = &events {
-                                    let _ = ev.send(format!(
-                                        "  inbound handshake with {addr} failed: {e}"
-                                    ));
-                                }
+                                log::log_warn(
+                                    &format!("inbound handshake with {addr} failed: {e}"),
+                                    &events,
+                                );
                                 return;
                             }
                         };
@@ -825,6 +885,7 @@ async fn main() {
                             events,
                             addr_key,
                             peer_best_height,
+                            rate_limit,
                         )
                         .await;
                     });
@@ -848,6 +909,7 @@ async fn main() {
         events_sender.clone(),
         shutdown.clone(),
         args.p2p_addr.clone(),
+        args.rate_limit,
     );
     let _pm_handle = pm.spawn();
 

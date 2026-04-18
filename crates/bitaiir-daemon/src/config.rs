@@ -36,6 +36,20 @@ pub struct NetworkConfig {
     pub rpc_addr: Option<String>,
     pub p2p_addr: Option<String>,
     pub connect: Option<Vec<String>>,
+    /// Token-bucket refill rate per peer, in messages per second.
+    /// Defaults to 100 when unset.  Normal block/tx relay sits well
+    /// under this; values lower than ~20 risk starving legitimate
+    /// peers during catch-up.
+    pub rate_limit_msgs_per_sec: Option<u32>,
+    /// Token-bucket capacity per peer (maximum burst).  Defaults to
+    /// 200.  Must be `>= rate_limit_msgs_per_sec` or bursts will be
+    /// dropped even at the configured steady-state rate.
+    pub rate_limit_burst: Option<u32>,
+    /// Duration (seconds) for which a peer is banned after violating
+    /// the rate limit.  Defaults to 600 (10 minutes).  The ban is
+    /// persisted to the `known_peers` table if the peer has an
+    /// outbound history; in-memory only for inbound-only peers.
+    pub rate_limit_ban_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -163,6 +177,15 @@ pub fn write_default_config(path: &Path) {
 # rpc_addr = "127.0.0.1:8443"        # mainnet default; testnet is 18443
 # p2p_addr = "127.0.0.1:8444"        # mainnet default; testnet is 18444
 # connect = ["127.0.0.1:8544"]
+
+# Per-peer message rate limit (token bucket).  A peer that sustains
+# more than `rate_limit_msgs_per_sec` messages/second — or bursts
+# past `rate_limit_burst` in aggregate — is disconnected and banned
+# for `rate_limit_ban_secs` seconds.  Defaults: 100 msgs/s, burst
+# 200, ban 600s.
+# rate_limit_msgs_per_sec = 100
+# rate_limit_burst        = 200
+# rate_limit_ban_secs     = 600
 
 [mining]
 # enabled = false

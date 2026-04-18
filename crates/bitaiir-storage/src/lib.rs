@@ -40,6 +40,7 @@ const BLOCK_UNDO: TableDefinition<&[u8], &[u8]> = TableDefinition::new("block_un
 const WALLET_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wallet_keys");
 const KNOWN_PEERS: TableDefinition<&str, &[u8]> = TableDefinition::new("known_peers");
 const METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
+const BANNED_IPS: TableDefinition<&str, &[u8]> = TableDefinition::new("banned_ips");
 
 // --- Errors -------------------------------------------------------------- //
 
@@ -557,6 +558,63 @@ impl Storage {
         {
             let mut table = write.open_table(KNOWN_PEERS)?;
             table.remove(addr)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Persist a rate-limit IP ban.
+    ///
+    /// Record layout (12 bytes): `deadline(8) + offenses(4)`.
+    /// `deadline` is a Unix timestamp; `offenses` is the running
+    /// count of rate-limit violations attributed to this IP across
+    /// the lifetime of the database (used for exponential backoff).
+    pub fn save_banned_ip(&self, ip: &str, deadline: u64, offenses: u32) -> Result<()> {
+        let mut value = Vec::with_capacity(12);
+        value.extend_from_slice(&deadline.to_le_bytes());
+        value.extend_from_slice(&offenses.to_le_bytes());
+        let write = self.db.begin_write()?;
+        {
+            let mut table = write.open_table(BANNED_IPS)?;
+            table.insert(ip, value.as_slice())?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Load every banned-IP record.  Returns
+    /// `(ip_string, deadline, offenses)` tuples; the caller is
+    /// responsible for parsing `ip_string` into an `IpAddr` and
+    /// dropping entries whose deadline has already elapsed.
+    pub fn load_banned_ips(&self) -> Result<Vec<(String, u64, u32)>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(BANNED_IPS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            let ip = key.value().to_string();
+            let bytes = value.value();
+            if bytes.len() < 12 {
+                continue;
+            }
+            let deadline = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+            let offenses = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+            out.push((ip, deadline, offenses));
+        }
+        Ok(out)
+    }
+
+    /// Remove a banned-IP record (e.g. when the ban expires and is
+    /// lazily cleaned up on inbound accept).
+    pub fn remove_banned_ip(&self, ip: &str) -> Result<()> {
+        let write = self.db.begin_write()?;
+        {
+            let mut table = write.open_table(BANNED_IPS)?;
+            table.remove(ip)?;
         }
         write.commit()?;
         Ok(())
