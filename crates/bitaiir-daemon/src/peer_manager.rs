@@ -114,24 +114,74 @@ impl TokenBucket {
     }
 }
 
-/// Hardcoded seed node IPs — last resort when the known-peer database
-/// is empty and no `--connect` was given.  Add entries as the network
-/// grows (public nodes with static IPs).
-pub const SEED_NODES: &[&str] = &[
-    // "203.0.113.10:8444",   // example — replace with real IPs
+// --------------------------------------------------------------------- //
+// Seed discovery
+// --------------------------------------------------------------------- //
+//
+// A node with no `known_peers` on disk and no `--connect` flag has to
+// bootstrap somehow.  Two fallbacks are consulted, in order:
+//
+//   1. **DNS seeds** — hostnames whose A/AAAA records are maintained
+//      by an operator running a crawler (see
+//      <https://github.com/sipa/bitcoin-seeder> for the reference
+//      implementation).  The crawler probes currently-alive nodes,
+//      keeps a ranked list, and updates the DNS zone.  New nodes
+//      resolve the hostname, learn ~a dozen IPs, and connect.
+//      Re-resolved every hour so stale IPs are pruned.
+//   2. **Hardcoded seed nodes** — a last-resort list compiled into
+//      the binary.  Used when DNS is blocked or the seeds are down.
+//      Should be a small set of long-lived static-IP nodes run by
+//      trusted operators.
+//
+// The arrays below are network-specific — mainnet and testnet have
+// separate bootstrap fleets so a testnet node never tries to peer
+// with mainnet and vice versa.  All four are currently empty; the
+// network is still in development and has no public nodes.  Populate
+// them as infrastructure lands.
+
+/// Hardcoded mainnet seed nodes.  `"ip:port"` strings; port defaults
+/// to 8444 when using the standard mainnet port.
+pub const SEED_NODES_MAINNET: &[&str] = &[
+    // TODO: populate with static-IP mainnet nodes.
+    // Example: "203.0.113.10:8444",
 ];
 
-/// DNS seed hostnames.  Resolved on startup and periodically (~1 h)
-/// to discover fresh node IPs.  Each hostname should return A/AAAA
-/// records pointing to active BitAiir nodes on the default P2P port.
-///
-/// Running a DNS seed is simple: set up a small crawler that probes
-/// known nodes and updates the DNS zone for the hostname.  Bitcoin's
-/// `bitcoin-seeder` is the reference implementation of this pattern.
-pub const DNS_SEEDS: &[&str] = &[
-    // "seed.bitaiir.org",
-    // "dnsseed.bitaiir.network",
+/// Hardcoded testnet seed nodes.  `"ip:port"` strings; port defaults
+/// to 18444 when using the standard testnet port.
+pub const SEED_NODES_TESTNET: &[&str] = &[
+    // TODO: populate with static-IP testnet nodes.
+    // Example: "203.0.113.11:18444",
 ];
+
+/// Mainnet DNS seed hostnames.  Each hostname's A/AAAA records
+/// should point at healthy mainnet P2P peers.
+pub const DNS_SEEDS_MAINNET: &[&str] = &[
+    // TODO: register and run a seeder for the mainnet.
+    // Example: "seed.bitaiir.org",
+];
+
+/// Testnet DNS seed hostnames.  Kept separate from mainnet so
+/// crossed-network connection attempts are impossible.
+pub const DNS_SEEDS_TESTNET: &[&str] = &[
+    // TODO: register and run a seeder for the testnet.
+    // Example: "testnet-seed.bitaiir.org",
+];
+
+/// Seed nodes for the currently-active network.
+pub fn seed_nodes() -> &'static [&'static str] {
+    match bitaiir_types::Network::active() {
+        bitaiir_types::Network::Mainnet => SEED_NODES_MAINNET,
+        bitaiir_types::Network::Testnet => SEED_NODES_TESTNET,
+    }
+}
+
+/// DNS seed hostnames for the currently-active network.
+pub fn dns_seeds() -> &'static [&'static str] {
+    match bitaiir_types::Network::active() {
+        bitaiir_types::Network::Mainnet => DNS_SEEDS_MAINNET,
+        bitaiir_types::Network::Testnet => DNS_SEEDS_TESTNET,
+    }
+}
 
 /// Default P2P port used when DNS resolution returns bare IPs.
 /// Reads from the active network (mainnet = 8444, testnet = 18444).
@@ -403,7 +453,7 @@ impl PeerManager {
     /// is resolved to A/AAAA records and the resulting IPs are added
     /// to `known_peers` with `PeerSource::Seed`.
     async fn maybe_resolve_dns_seeds(&self) {
-        if DNS_SEEDS.is_empty() {
+        if dns_seeds().is_empty() {
             return;
         }
         let last = self.last_dns_resolve.load(Ordering::Relaxed);
@@ -421,7 +471,7 @@ impl PeerManager {
     async fn resolve_dns_seeds(&self) {
         let mut total_discovered = 0usize;
 
-        for &hostname in DNS_SEEDS {
+        for &hostname in dns_seeds() {
             // lookup_host wants "host:port" — the port is needed for
             // the resolver API but we use our own DEFAULT_P2P_PORT.
             let lookup = format!("{hostname}:{}", default_p2p_port());
