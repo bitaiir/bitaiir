@@ -36,7 +36,30 @@ BitAiir is a cryptocurrency designed for **everyday payments** — inspired by B
 
 ## Quick Start
 
-### Build
+### Docker
+
+Pre-built images are published to GitHub Container Registry on every release:
+
+```bash
+# Testnet node, persistent data in a named volume.  The explicit
+# `0.0.0.0` binds are needed so `-p` port forwarding from the host
+# actually reaches the daemon — the default `127.0.0.1` only binds
+# inside the container's loopback namespace.
+docker run -d --name bitaiir \
+    -v bitaiir_testnet:/data \
+    -p 18443:18443 -p 18444:18444 \
+    ghcr.io/bitaiir/bitaiir:latest \
+    --testnet \
+    --rpc-addr 0.0.0.0:18443 \
+    --p2p-addr 0.0.0.0:18444
+
+# Query the node through the bundled CLI inside the container.
+docker exec bitaiir bitaiir-cli --testnet getblockchaininfo
+```
+
+For mainnet drop the `--testnet` flag and swap the ports to `8443`/`8444`.  `:latest` tracks the newest stable release; pin to `:v0.1.0` (or any tag) for reproducibility.
+
+### Build from source
 
 Requires [Rust](https://rustup.rs/) (stable, edition 2024).
 

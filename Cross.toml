@@ -1,0 +1,19 @@
+# `cross` per-target overrides used by the release workflow.
+#
+# Linux cross-compile targets need the XCB development headers for
+# the `arboard` clipboard crate that `bitaiir-daemon` links in for
+# the interactive TUI.  The base images `cross` ships with are
+# minimal, so we inject the packages via `pre-build` before cargo
+# runs inside the container.
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes libxcb-render0-dev:$CROSS_DEB_ARCH libxcb-shape0-dev:$CROSS_DEB_ARCH libxcb-xfixes0-dev:$CROSS_DEB_ARCH",
+]
+
+[target.riscv64gc-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes libxcb-render0-dev:$CROSS_DEB_ARCH libxcb-shape0-dev:$CROSS_DEB_ARCH libxcb-xfixes0-dev:$CROSS_DEB_ARCH",
+]
