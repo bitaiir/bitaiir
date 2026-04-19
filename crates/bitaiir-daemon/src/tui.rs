@@ -1026,12 +1026,18 @@ fn handle_mouse_up(app: &mut App) {
 pub fn run_repl(
     rpc_addr: &str,
     rpc_basic_token: &str,
+    tls_enabled: bool,
     log_tx: std::sync::mpsc::Sender<String>,
     log_rx: Receiver<String>,
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let rt = tokio::runtime::Handle::current();
-    let url = format!("http://{rpc_addr}");
+    // When the daemon is serving HTTPS the TUI must match — speaking
+    // HTTP to the TLS proxy returns "InvalidContentType" server-side
+    // and `SendRequest` client-side.
+    let scheme = if tls_enabled { "https" } else { "http" };
+    let url = format!("{scheme}://{rpc_addr}");
+
     // Attach HTTP Basic auth to every request — the RPC server's
     // middleware rejects anything else with 401.  `rpc_basic_token`
     // is already base64-encoded `user:password`.
@@ -1041,10 +1047,24 @@ pub fn run_repl(
         http::HeaderValue::from_str(&format!("Basic {rpc_basic_token}"))
             .expect("base64 token is ASCII"),
     );
-    let client = jsonrpsee::http_client::HttpClientBuilder::default()
-        .set_headers(headers)
-        .build(&url)
-        .expect("build RPC client");
+
+    let mut builder = jsonrpsee::http_client::HttpClientBuilder::default().set_headers(headers);
+    if tls_enabled {
+        // The TUI only ever self-connects to its own daemon over
+        // loopback — the TLS proxy is a task in *this* process.  No
+        // network hop, no MITM surface.  Certificate verification is
+        // pure ceremony here and actively breaks when the operator
+        // plugs in a CA-signed cert whose SAN is a public hostname
+        // rather than `127.0.0.1`.  Accept whatever the local proxy
+        // presents and move on.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let tls_cfg = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(LoopbackInsecureVerifier))
+            .with_no_client_auth();
+        builder = builder.with_custom_cert_store(tls_cfg);
+    }
+    let client = builder.build(&url).expect("build RPC client");
 
     let (cols, rows) = terminal::size()?;
     if rows < CHROME_ROWS + 2 {
@@ -1635,4 +1655,51 @@ fn handle_command(
         }
         let _ = log_tx.send(String::new());
     });
+}
+
+// --- Loopback TLS verifier ---------------------------------------------- //
+
+/// Accept any server certificate on loopback.  The TUI only ever
+/// connects back to its own daemon's TLS proxy — same process, same
+/// host, no MITM surface — so actual cert checking is pointless
+/// ceremony, and it actively fails when the operator has wired a
+/// public CA-signed cert whose SAN doesn't include `127.0.0.1`.
+#[derive(Debug)]
+struct LoopbackInsecureVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for LoopbackInsecureVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }

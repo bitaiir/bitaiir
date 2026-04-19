@@ -1138,12 +1138,14 @@ async fn main() {
         let repl_shutdown = shutdown.clone();
         let repl_log_tx = log_tx.clone();
         let repl_basic_token = rpc_creds.basic_token();
+        let repl_tls_enabled = tls_config.is_some();
         let _ = tokio::task::spawn_blocking(move || {
             // Wait for RPC server to be ready.
             std::thread::sleep(std::time::Duration::from_millis(500));
             if let Err(e) = tui::run_repl(
                 &repl_rpc_addr,
                 &repl_basic_token,
+                repl_tls_enabled,
                 repl_log_tx,
                 log_rx,
                 repl_shutdown,
