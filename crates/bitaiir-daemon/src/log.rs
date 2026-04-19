@@ -23,36 +23,53 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
 
-/// Print a plain line (no timestamp, no level) to the terminal and,
-/// if in interactive mode, to the TUI log channel.  Used for the
-/// startup banner, mining table rows, JSON command output — anything
-/// that's informational content rather than a system event.
+/// Print a plain line (no timestamp, no level).  When `events` is
+/// `Some` we're in interactive mode: the line goes only to the TUI
+/// log channel, because `println!` during the TUI's lifetime writes
+/// to the alternate-screen buffer and is wiped on exit.  The TUI
+/// replays its buffer to stdout after `LeaveAlternateScreen`, so the
+/// user sees every line once.  When `events` is `None` (daemon mode
+/// without TUI) we `println!` directly.
 pub fn print_line(msg: &str, events: &Option<Sender<String>>) {
-    println!("{msg}");
-    if let Some(ev) = events {
-        let _ = ev.send(msg.to_string());
+    match events {
+        Some(ev) => {
+            let _ = ev.send(msg.to_string());
+        }
+        None => {
+            println!("{msg}");
+        }
     }
 }
 
 /// Log an INFO-level event: `<dim timestamp>  <green INFO> message`.
-/// Printed to terminal + TUI channel.
+/// Routing follows [`print_line`]: TUI channel when interactive,
+/// stdout otherwise.
 pub fn log_info(msg: &str, events: &Option<Sender<String>>) {
     let ts = iso_utc_now();
     let line = format!("{DIM}{ts}{RESET}  {GREEN}INFO{RESET} {msg}");
-    println!("{line}");
-    if let Some(ev) = events {
-        let _ = ev.send(line);
+    match events {
+        Some(ev) => {
+            let _ = ev.send(line);
+        }
+        None => {
+            println!("{line}");
+        }
     }
 }
 
 /// Log a WARN-level event: `<dim timestamp>  <yellow WARN> message`.
-/// Printed to terminal + TUI channel.
+/// Routing follows [`print_line`]: TUI channel when interactive,
+/// stdout otherwise.
 pub fn log_warn(msg: &str, events: &Option<Sender<String>>) {
     let ts = iso_utc_now();
     let line = format!("{DIM}{ts}{RESET}  {YELLOW}WARN{RESET} {msg}");
-    println!("{line}");
-    if let Some(ev) = events {
-        let _ = ev.send(line);
+    match events {
+        Some(ev) => {
+            let _ = ev.send(line);
+        }
+        None => {
+            println!("{line}");
+        }
     }
 }
 

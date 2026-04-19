@@ -28,7 +28,6 @@ use clap::Parser;
 use jsonrpsee::server::ServerBuilder;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
 
 mod config;
 mod log;
@@ -287,8 +286,8 @@ async fn main() {
                         w.import_key(addr.clone(), privkey.clone(), *pubkey);
                     }
                 }
-                log::log_info(
-                    &format!("HD wallet restored ({stored_hd_index} derived address(es))"),
+                log::print_line(
+                    &format!("  HD wallet restored ({stored_hd_index} derived address(es))"),
                     ev,
                 );
                 w
@@ -422,7 +421,7 @@ async fn main() {
             // Generate a new HD wallet with a 24-word mnemonic.
             let mnemonic = bitaiir_crypto::hd::generate_mnemonic();
             log::print_line("", ev);
-            log::log_info("New HD wallet created (24-word mnemonic)", ev);
+            log::print_line("  New HD wallet created (24-word mnemonic)", ev);
             log::print_line("", ev);
             log::print_line("  ┌──────────────────────────────────────────────────┐", ev);
             log::print_line("  │  BACKUP YOUR SEED PHRASE — WRITE IT DOWN NOW!    │", ev);
@@ -789,7 +788,10 @@ async fn main() {
         let listener = match TcpListener::bind(&p2p_addr).await {
             Ok(l) => l,
             Err(e) => {
-                warn!("failed to bind P2P listener on {p2p_addr}: {e}");
+                log::log_warn(
+                    &format!("failed to bind P2P listener on {p2p_addr}: {e}"),
+                    &p2p_events,
+                );
                 return;
             }
         };
@@ -834,13 +836,7 @@ async fn main() {
                         };
                         let mut peer = Peer::new(stream, addr);
                         let version = match peer.handshake_inbound(our_height).await {
-                            Ok(v) => {
-                                info!(
-                                    "inbound peer {} connected: agent={}, height={}",
-                                    addr, v.user_agent, v.best_height,
-                                );
-                                v
-                            }
+                            Ok(v) => v,
                             Err(e) => {
                                 log::log_warn(
                                     &format!("inbound handshake with {addr} failed: {e}"),
@@ -864,12 +860,13 @@ async fn main() {
                                 sender: tx_send,
                             });
                         }
-                        if let Some(ev) = &events {
-                            let _ = ev.send(format!(
-                                "  peer connected: {addr_key} (inbound, {}, height {})",
+                        log::log_info(
+                            &format!(
+                                "peer connected: {addr_key} (inbound, {}, height {})",
                                 version.user_agent, version.best_height,
-                            ));
-                        }
+                            ),
+                            &events,
+                        );
 
                         // Delegate to the shared gossip loop which
                         // handles headers, blocks, txs, pings, AND
@@ -891,7 +888,7 @@ async fn main() {
                     });
                 }
                 Err(e) => {
-                    warn!("P2P accept error: {e}");
+                    log::log_warn(&format!("P2P accept error: {e}"), &p2p_events);
                 }
             }
         }
@@ -951,6 +948,11 @@ async fn main() {
 
     let mining_handle = tokio::task::spawn_blocking(move || {
         let log_tx = mining_log_tx;
+        let mining_events: Option<std::sync::mpsc::Sender<String>> = if is_interactive {
+            Some(log_tx.clone())
+        } else {
+            None
+        };
         let mut header_printed = false;
 
         macro_rules! row_fmt {
@@ -1026,12 +1028,18 @@ async fn main() {
             {
                 let mut s = mining_state.blocking_write();
                 if let Err(e) = validate_block(&block, &s.chain, &s.utxo, timestamp + 1) {
-                    warn!("self-mined block failed validation: {e}");
+                    log::log_warn(
+                        &format!("self-mined block failed validation: {e}"),
+                        &mining_events,
+                    );
                     continue;
                 }
 
                 if let Err(e) = s.chain.push(block.clone()) {
-                    warn!("self-mined block failed push: {e}");
+                    log::log_warn(
+                        &format!("self-mined block failed push: {e}"),
+                        &mining_events,
+                    );
                     continue;
                 }
                 // Apply the block's transactions to the UTXO set and
@@ -1041,13 +1049,19 @@ async fn main() {
                 let undo = match s.utxo.apply_block_with_undo(&block, next_height) {
                     Ok(u) => u,
                     Err(e) => {
-                        warn!("self-mined block UTXO apply failed: {e}");
+                        log::log_warn(
+                            &format!("self-mined block UTXO apply failed: {e}"),
+                            &mining_events,
+                        );
                         continue;
                     }
                 };
 
                 if let Err(e) = mining_storage.apply_block(next_height, &block, &undo) {
-                    warn!("failed to persist block {next_height}: {e}");
+                    log::log_warn(
+                        &format!("failed to persist block {next_height}: {e}"),
+                        &mining_events,
+                    );
                 }
 
                 // Broadcast the new block to all connected peers in
@@ -1114,7 +1128,7 @@ async fn main() {
             }
         }
 
-        info!("Mining thread exiting.");
+        log::log_info("Mining thread exiting.", &mining_events);
     });
 
     // --- Wait for shutdown / interactive REPL ----------------------------- //
@@ -1148,7 +1162,7 @@ async fn main() {
     }
 
     shutdown.store(true, Ordering::Relaxed);
-    info!("Shutting down...");
+    log::log_info("Shutting down...", &None);
     rpc_handle.stop().expect("rpc handle stop");
     let _ = mining_handle.await;
 
@@ -1157,14 +1171,17 @@ async fn main() {
     // startup just overwrites.
     if let Some(cookie_path) = &rpc_creds.cookie_path {
         if let Err(e) = rpc_auth::clear_cookie(cookie_path) {
-            warn!(
-                "failed to remove cookie file {}: {e}",
-                cookie_path.display()
+            log::log_warn(
+                &format!(
+                    "failed to remove cookie file {}: {e}",
+                    cookie_path.display()
+                ),
+                &None,
             );
         }
     }
 
-    info!("Goodbye.");
+    log::log_info("Goodbye.", &None);
 }
 
 // The old REPL code has been replaced by the TUI in tui.rs.
