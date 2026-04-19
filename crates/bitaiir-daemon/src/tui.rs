@@ -1189,6 +1189,19 @@ pub fn run_repl(
         LeaveAlternateScreen,
     );
     let _ = disable_raw_mode();
+
+    // Replay the TUI's log pane to the real terminal.  The
+    // alternate-screen buffer is wiped the moment `LeaveAlternateScreen`
+    // runs, so every frame the TUI drew is gone — and with it every
+    // log line the user saw inside the pane.  Dumping the in-memory
+    // buffer here gives the user a persistent scroll-back copy of the
+    // session's log content.
+    println!();
+    println!("─── Session log ───");
+    for line in &app.buffer.lines {
+        println!("{line}");
+    }
+
     outcome
 }
 

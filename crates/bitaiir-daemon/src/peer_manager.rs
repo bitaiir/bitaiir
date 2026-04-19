@@ -26,7 +26,6 @@ use bitaiir_storage::Storage;
 use bitaiir_types::{BlockHeader, Hash256, Transaction};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
 
 // --------------------------------------------------------------------- //
 // Compact-block reconstruction state
@@ -199,7 +198,7 @@ impl PeerManager {
             }
             self.tick().await;
         }
-        info!("PeerManager exiting.");
+        self.emit_info("PeerManager exiting.");
     }
 
     /// One iteration: check outbound count and try to connect if below
@@ -257,8 +256,7 @@ impl PeerManager {
     /// Attempt a single outbound connection: TCP → handshake → sync →
     /// spawn gossip loop.
     async fn try_connect(&self, addr: &str) {
-        info!("PeerManager: connecting to {addr}...");
-        self.emit(format!("  reconnecting to {addr}..."));
+        self.emit_info(&format!("reconnecting to {addr}..."));
 
         let stream = match tokio::time::timeout(
             Duration::from_secs(10),
@@ -268,12 +266,12 @@ impl PeerManager {
         {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
-                warn!("PeerManager: failed to connect to {addr}: {e}");
+                self.emit_warn(&format!("failed to connect to {addr}: {e}"));
                 self.record_failure(addr).await;
                 return;
             }
             Err(_) => {
-                warn!("PeerManager: connection to {addr} timed out");
+                self.emit_warn(&format!("connection to {addr} timed out"));
                 self.record_failure(addr).await;
                 return;
             }
@@ -301,7 +299,7 @@ impl PeerManager {
         {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
-                warn!("PeerManager: handshake with {addr} failed: {e}");
+                self.emit_warn(&format!("handshake with {addr} failed: {e}"));
                 // Bad handshake → longer ban.
                 let mut s = self.state.write().await;
                 if let Some(kp) = s.known_peers.get_mut(addr) {
@@ -310,16 +308,16 @@ impl PeerManager {
                 return;
             }
             Err(_) => {
-                warn!("PeerManager: handshake with {addr} timed out");
+                self.emit_warn(&format!("handshake with {addr} timed out"));
                 self.record_failure(addr).await;
                 return;
             }
         };
 
-        info!(
-            "PeerManager: connected to {addr} (agent={}, height={})",
-            their_version.user_agent, their_version.best_height
-        );
+        self.emit_info(&format!(
+            "connected to {addr} (agent={}, height={})",
+            their_version.user_agent, their_version.best_height,
+        ));
 
         // Sync if the peer is ahead.
         let (reader, writer, _peer_addr) = peer.into_parts();
@@ -344,8 +342,8 @@ impl PeerManager {
         // Persist updated known-peer record.
         self.persist_known_peer(addr).await;
 
-        self.emit(format!(
-            "  peer connected: {peer_addr_key} (outbound, {}, height {})",
+        self.emit_info(&format!(
+            "peer connected: {peer_addr_key} (outbound, {}, height {})",
             their_version.user_agent, their_version.best_height,
         ));
 
@@ -376,8 +374,8 @@ impl PeerManager {
         let mut s = self.state.write().await;
         if let Some(kp) = s.known_peers.get_mut(addr) {
             kp.record_failure();
-            self.emit(format!(
-                "  peer {addr}: connection failed ({} failures)",
+            self.emit_warn(&format!(
+                "peer {addr}: connection failed ({} failures)",
                 kp.consecutive_failures
             ));
         }
@@ -451,23 +449,26 @@ impl PeerManager {
                     }
                 }
                 Err(e) => {
-                    warn!("DNS seed resolve failed for {hostname}: {e}");
+                    self.emit_warn(&format!("DNS seed resolve failed for {hostname}: {e}"));
                 }
             }
         }
 
         if total_discovered > 0 {
-            info!("DNS seeds: discovered {total_discovered} new peer(s)");
-            self.emit(format!(
-                "  DNS seeds: discovered {total_discovered} new peer(s)"
+            self.emit_info(&format!(
+                "DNS seeds: discovered {total_discovered} new peer(s)"
             ));
         }
     }
 
-    fn emit(&self, msg: String) {
-        if let Some(tx) = &self.events {
-            let _ = tx.send(msg);
-        }
+    /// Emit a timestamped INFO event.
+    fn emit_info(&self, msg: &str) {
+        crate::log::log_info(msg, &self.events);
+    }
+
+    /// Emit a timestamped WARN event.
+    fn emit_warn(&self, msg: &str) {
+        crate::log::log_warn(msg, &self.events);
     }
 }
 
@@ -520,11 +521,10 @@ pub async fn run_gossip_loop(
         let f = protocol::frame_message(m.command(), &p);
         let _ = writer.write_all(&f).await;
         let _ = writer.flush().await;
-        if let Some(ev) = &events {
-            let _ = ev.send(format!(
-                "  requesting headers from {peer_key} ({our_height} → {peer_best_height})",
-            ));
-        }
+        crate::log::log_info(
+            &format!("requesting headers from {peer_key} ({our_height} → {peer_best_height})"),
+            &events,
+        );
     }
 
     // Compact blocks we've received but not yet been able to fully
@@ -708,22 +708,21 @@ pub async fn run_gossip_loop(
                             let f = protocol::frame_message(m.command(), &p);
                             if writer.write_all(&f).await.is_err() { break; }
                             let _ = writer.flush().await;
-                            if let Some(ev) = &events {
-                                let _ = ev.send(format!(
-                                    "  {} headers validated from {peer_key}, fetching bodies from height {request_from}",
+                            crate::log::log_info(
+                                &format!(
+                                    "{} headers validated from {peer_key}, fetching bodies from height {request_from}",
                                     headers.len(),
-                                ));
-                            }
-                        } else if !headers.is_empty() {
-                            warn!(
-                                "peer {peer_key}: {} header(s) failed PoW/chain validation",
-                                headers.len(),
+                                ),
+                                &events,
                             );
-                            if let Some(ev) = &events {
-                                let _ = ev.send(format!(
-                                    "  peer {peer_key}: invalid header chain, ignoring",
-                                ));
-                            }
+                        } else if !headers.is_empty() {
+                            crate::log::log_warn(
+                                &format!(
+                                    "peer {peer_key}: {} header(s) failed PoW/chain validation — ignoring",
+                                    headers.len(),
+                                ),
+                                &events,
+                            );
                         }
                     }
                     Ok(Some(NetMessage::GetBlocks(start_height))) => {
@@ -824,15 +823,19 @@ pub async fn run_gossip_loop(
                                 )
                                 .await;
                                 if ok {
-                                    if let Some(ev) = &events {
-                                        let _ = ev.send(format!(
-                                            "  compact block from {peer_key} reconstructed ({asked} tx via GetBlockTxn)",
-                                        ));
-                                    }
+                                    crate::log::log_info(
+                                        &format!(
+                                            "compact block from {peer_key} reconstructed ({asked} tx via GetBlockTxn)",
+                                        ),
+                                        &events,
+                                    );
                                 }
                             } else {
-                                warn!(
-                                    "peer {peer_key}: BlockTxn did not fill all missing slots",
+                                crate::log::log_warn(
+                                    &format!(
+                                        "peer {peer_key}: BlockTxn did not fill all missing slots",
+                                    ),
+                                    &events,
                                 );
                             }
                         }
@@ -860,15 +863,24 @@ pub async fn run_gossip_loop(
                                     &s.utxo,
                                     next_height,
                                 ) {
-                                    warn!(
-                                        "peer {peer_key}: rejected tx {txid}: {e}",
+                                    crate::log::log_warn(
+                                        &format!(
+                                            "peer {peer_key}: rejected tx {txid}: {e}",
+                                        ),
+                                        &events,
                                     );
                                 } else if let Err(e) = s.mempool.add(tx) {
-                                    warn!(
-                                        "peer {peer_key}: mempool rejected tx {txid}: {e}",
+                                    crate::log::log_warn(
+                                        &format!(
+                                            "peer {peer_key}: mempool rejected tx {txid}: {e}",
+                                        ),
+                                        &events,
                                     );
                                 } else {
-                                    info!("received tx {txid} from peer {peer_key}");
+                                    crate::log::log_info(
+                                        &format!("received tx {txid} from peer {peer_key}"),
+                                        &events,
+                                    );
                                 }
                             }
                         }
@@ -926,7 +938,6 @@ pub async fn run_gossip_loop(
                     }
                     Ok(_) => {}
                     Err(_) => {
-                        info!("peer {peer_key} disconnected");
                         break;
                     }
                 }
@@ -939,9 +950,7 @@ pub async fn run_gossip_loop(
         let mut s = state.write().await;
         s.peers.retain(|p| p.addr != peer_key);
     }
-    if let Some(ev) = &events {
-        let _ = ev.send(format!("  peer disconnected: {peer_key}"));
-    }
+    crate::log::log_info(&format!("peer disconnected: {peer_key}"), &events);
 }
 
 fn unix_now() -> u64 {
@@ -986,7 +995,10 @@ async fn try_accept_and_apply_block(
 ) -> bool {
     // 1. Cheap standalone validation.
     if let Err(e) = bitaiir_chain::validate_block_standalone(&block) {
-        warn!("peer {peer_key}: block failed standalone validation: {e}");
+        crate::log::log_warn(
+            &format!("peer {peer_key}: block failed standalone validation: {e}"),
+            events,
+        );
         return false;
     }
 
@@ -1003,25 +1015,36 @@ async fn try_accept_and_apply_block(
         // Tip-extending path.  Validate fully first — cheaper to
         // reject now than to unwind chain state later.
         if let Err(e) = bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200) {
-            warn!("peer {peer_key}: tip-extending block failed validation: {e}");
+            crate::log::log_warn(
+                &format!("peer {peer_key}: tip-extending block failed validation: {e}"),
+                events,
+            );
             return false;
         }
         let height = s.chain.height() + 1;
         match s.chain.accept_block(block.clone()) {
             Ok(bitaiir_chain::AcceptOutcome::Connected) => {}
             Ok(other) => {
-                warn!("peer {peer_key}: unexpected outcome {other:?} for tip-extending block");
+                crate::log::log_warn(
+                    &format!(
+                        "peer {peer_key}: unexpected outcome {other:?} for tip-extending block"
+                    ),
+                    events,
+                );
                 return false;
             }
             Err(e) => {
-                warn!("peer {peer_key}: chain rejected tip-extending block: {e}");
+                crate::log::log_warn(
+                    &format!("peer {peer_key}: chain rejected tip-extending block: {e}"),
+                    events,
+                );
                 return false;
             }
         }
         let undo = match s.utxo.apply_block_with_undo(&block, height) {
             Ok(u) => u,
             Err(e) => {
-                warn!("peer {peer_key}: UTXO apply failed: {e}");
+                crate::log::log_warn(&format!("peer {peer_key}: UTXO apply failed: {e}"), events);
                 return false;
             }
         };
@@ -1035,7 +1058,10 @@ async fn try_accept_and_apply_block(
                 break;
             }
         }
-        info!("received block {height} from peer {peer_key}");
+        crate::log::log_info(
+            &format!("received block {height} from peer {peer_key}"),
+            events,
+        );
         return true;
     }
 
@@ -1044,7 +1070,10 @@ async fn try_accept_and_apply_block(
     let outcome = match s.chain.accept_block(block.clone()) {
         Ok(o) => o,
         Err(e) => {
-            warn!("peer {peer_key}: chain rejected side-chain block: {e}");
+            crate::log::log_warn(
+                &format!("peer {peer_key}: chain rejected side-chain block: {e}"),
+                events,
+            );
             return false;
         }
     };
@@ -1052,18 +1081,20 @@ async fn try_accept_and_apply_block(
     match outcome {
         bitaiir_chain::AcceptOutcome::Duplicate => true,
         bitaiir_chain::AcceptOutcome::SideChain => {
-            if let Some(ev) = events {
-                let _ = ev.send(format!(
-                    "  side-chain block from {peer_key} stored (no reorg)",
-                ));
-            }
+            crate::log::log_info(
+                &format!("side-chain block from {peer_key} stored (no reorg)"),
+                events,
+            );
             true
         }
         bitaiir_chain::AcceptOutcome::Connected => {
             // accept_block does not report Connected for
             // non-tip-extending blocks, so this path is unreachable
             // — but we handle it defensively rather than panicking.
-            warn!("peer {peer_key}: unexpected Connected outcome off-tip");
+            crate::log::log_warn(
+                &format!("peer {peer_key}: unexpected Connected outcome off-tip"),
+                events,
+            );
             false
         }
         bitaiir_chain::AcceptOutcome::Reorg {
@@ -1078,16 +1109,18 @@ async fn try_accept_and_apply_block(
                 common_ancestor,
                 &undone,
                 &applied,
+                events,
             )
             .await;
             if ok {
-                if let Some(ev) = events {
-                    let _ = ev.send(format!(
-                        "  reorg from {peer_key}: undone {} block(s), applied {} block(s)",
+                crate::log::log_info(
+                    &format!(
+                        "reorg from {peer_key}: undone {} block(s), applied {} block(s)",
                         undone.len(),
                         applied.len(),
-                    ));
-                }
+                    ),
+                    events,
+                );
             }
             ok
         }
@@ -1118,6 +1151,7 @@ async fn perform_reorg(
     common_ancestor: Hash256,
     undone: &[Hash256],
     applied: &[Hash256],
+    events: &Option<std::sync::mpsc::Sender<String>>,
 ) -> bool {
     // Snapshot the mutable in-memory state.  Rollback on failure is
     // just three assignments — cheap, and keeps the failure path
@@ -1203,7 +1237,10 @@ async fn perform_reorg(
     let (undone_persist, applied_persist) = match persist {
         Ok(v) => v,
         Err(msg) => {
-            warn!("reorg aborted ({peer_key}): {msg} — restoring pre-reorg state");
+            crate::log::log_warn(
+                &format!("reorg aborted ({peer_key}): {msg} — restoring pre-reorg state"),
+                events,
+            );
             s.utxo = utxo_snapshot;
             s.chain.restore_main_chain(main_chain_snapshot);
             s.mempool = mempool_snapshot;
@@ -1228,7 +1265,10 @@ async fn perform_reorg(
         &undone_persist,
         &applied_persist,
     ) {
-        warn!("reorg persist: storage.apply_reorg failed: {e}");
+        crate::log::log_warn(
+            &format!("reorg persist: storage.apply_reorg failed: {e}"),
+            events,
+        );
     }
 
     // 5. Bump the peer's best_height to the new tip height.
@@ -1238,7 +1278,10 @@ async fn perform_reorg(
             break;
         }
     }
-    info!("reorg complete: new tip height {new_tip_height} (peer {peer_key})");
+    crate::log::log_info(
+        &format!("reorg complete: new tip height {new_tip_height} (peer {peer_key})"),
+        events,
+    );
     true
 }
 
@@ -1273,7 +1316,10 @@ async fn handle_compact_block(
     let pow_hash = bitaiir_chain::aiir_pow(&cb.header);
     let target = bitaiir_chain::CompactTarget::from_bits(cb.header.bits);
     if !target.hash_meets_target(pow_hash.as_bytes()) {
-        warn!("peer {peer_key}: compact block failed PoW");
+        crate::log::log_warn(
+            &format!("peer {peer_key}: compact block failed PoW"),
+            events,
+        );
         return;
     }
     let our_tip = {
@@ -1339,22 +1385,22 @@ async fn handle_compact_block(
         };
         let ok = try_accept_and_apply_block(block, state, storage, peer_key, events).await;
         if ok {
-            if let Some(ev) = events {
-                let _ = ev.send(format!(
-                    "  compact block from {peer_key} reconstructed fully from mempool",
-                ));
-            }
+            crate::log::log_info(
+                &format!("compact block from {peer_key} reconstructed fully from mempool"),
+                events,
+            );
         }
         return;
     }
 
     // 6. Still missing some txs — ask the peer and stash the partial.
-    if let Some(ev) = events {
-        let _ = ev.send(format!(
-            "  compact block from {peer_key}: {} tx(s) missing, requesting",
+    crate::log::log_info(
+        &format!(
+            "compact block from {peer_key}: {} tx(s) missing, requesting",
             missing_indexes.len(),
-        ));
-    }
+        ),
+        events,
+    );
     let req = NetMessage::GetBlockTxn(GetBlockTxnMsg {
         block_hash,
         indexes: missing_indexes.clone(),
