@@ -29,9 +29,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `asset_name` is the human-friendly short label that ends
+          # up in the archive filename (e.g. `linux-x86_64`), while
+          # `target` is the exact Rust/LLVM triple passed to cargo.
           # x86_64-linux — native on the runner, uses the host's
           # libxcb-*-dev packages installed below.
           - target: x86_64-unknown-linux-gnu
+            asset_name: linux-x86_64
             os: ubuntu-latest
             archive: tar.gz
             use_cross: false
@@ -39,22 +43,27 @@ jobs:
           # xcb headers are installed inside the build image by the
           # `pre-build` commands in `Cross.toml`.
           - target: aarch64-unknown-linux-gnu
+            asset_name: linux-aarch64
             os: ubuntu-latest
             archive: tar.gz
             use_cross: true
           - target: riscv64gc-unknown-linux-gnu
+            asset_name: linux-riscv64
             os: ubuntu-latest
             archive: tar.gz
             use_cross: true
           - target: x86_64-apple-darwin
+            asset_name: macos-x86_64
             os: macos-latest
             archive: tar.gz
             use_cross: false
           - target: aarch64-apple-darwin
+            asset_name: macos-aarch64
             os: macos-latest
             archive: tar.gz
             use_cross: false
           - target: x86_64-pc-windows-msvc
+            asset_name: windows-x86_64
             os: windows-latest
             archive: zip
             use_cross: false
@@ -100,7 +109,7 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          stage="bitaiir-${version}-${{ matrix.target }}"
+          stage="bitaiir-${version}-${{ matrix.asset_name }}"
           mkdir -p "$stage"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp "target/${{ matrix.target }}/release/bitaiird.exe" "$stage/"
@@ -130,7 +139,7 @@ jobs:
       - name: Upload archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bitaiir-${{ matrix.target }}
+          name: bitaiir-${{ matrix.asset_name }}
           path: |
             ${{ env.STAGE }}.${{ matrix.archive }}
             ${{ env.STAGE }}.${{ matrix.archive }}.sha256
