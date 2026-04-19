@@ -489,7 +489,7 @@ async fn main() {
             });
     }
     // Seed nodes (fallback).
-    for &addr in peer_manager::SEED_NODES {
+    for &addr in peer_manager::seed_nodes() {
         known_peers
             .entry(addr.to_string())
             .or_insert_with(|| bitaiir_rpc::KnownPeer {

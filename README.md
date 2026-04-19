@@ -136,6 +136,23 @@ Two nodes on the same machine:
 
 Node B downloads all missing blocks from Node A, validates each one, and persists to disk. Transactions broadcast automatically between connected peers.
 
+### Seed nodes and DNS seeds
+
+A fresh node (no saved `known_peers`, no `--connect`) bootstraps by consulting two compiled-in fallbacks, in order:
+
+1. **DNS seeds** — hostnames whose A/AAAA records resolve to healthy peers. Re-resolved every hour.
+2. **Hardcoded seed nodes** — a short list of long-lived static-IP nodes embedded in the binary.
+
+Both lists are network-specific (mainnet/testnet) and live in `crates/bitaiir-daemon/src/peer_manager.rs` (`SEED_NODES_MAINNET`, `DNS_SEEDS_MAINNET`, and the testnet counterparts). They are currently empty — the network is in development and has no public infrastructure yet.
+
+**Running a DNS seeder:** the reference implementation is [`bitcoin-seeder`](https://github.com/sipa/bitcoin-seeder). The pattern is the same for BitAiir:
+
+1. Run a crawler that connects to known BitAiir nodes, follows `getaddr`/`addr` gossip to discover more, and ranks them by uptime and recency.
+2. Expose an authoritative DNS server for a hostname (e.g. `seed.bitaiir.org`) that returns rotating A/AAAA records drawn from the top-ranked peers.
+3. Register the hostname in the appropriate `DNS_SEEDS_*` array and ship a new release.
+
+Static seed nodes are simpler: operate a BitAiir node on a static IP, commit its `"ip:port"` string to the appropriate `SEED_NODES_*` array, and release.
+
 ---
 
 ## Protocol Summary
