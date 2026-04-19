@@ -1,0 +1,29 @@
+# Rust build output — regenerated inside the builder stage.
+/target
+**/target
+
+# Local data directories (may contain wallet keys and cookies).
+/bitaiir_data
+/bitaiir_testnet_data
+**/bitaiir_data*
+
+# Editor / IDE metadata.
+.idea
+.vscode
+
+# Git history is not needed at build time.
+.git
+.gitignore
+
+# Docker config files (avoid recursion).
+Dockerfile
+.dockerignore
+
+# OS metadata.
+.DS_Store
+Thumbs.db
+
+# Secrets — never ship TLS material or RPC cookies into an image.
+*.cert
+*.key
+*.cookie
