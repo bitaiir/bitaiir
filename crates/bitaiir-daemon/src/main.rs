@@ -287,9 +287,7 @@ async fn main() {
                     }
                 }
                 log::print_line(
-                    &format!(
-                        "  HD wallet restored ({stored_hd_index} derived address(es))"
-                    ),
+                    &format!("  HD wallet restored ({stored_hd_index} derived address(es))"),
                     ev,
                 );
                 w
