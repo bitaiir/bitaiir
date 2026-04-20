@@ -1,19 +1,16 @@
 # `cross` per-target overrides used by the release workflow.
 #
-# Linux cross-compile targets need the XCB development headers for
-# the `arboard` clipboard crate that `bitaiir-daemon` links in for
-# the interactive TUI.  The base images `cross` ships with are
-# minimal, so we inject the packages via `pre-build` before cargo
-# runs inside the container.
-
-[target.aarch64-unknown-linux-gnu]
-pre-build = [
-    "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get install --assume-yes libxcb-render0-dev:$CROSS_DEB_ARCH libxcb-shape0-dev:$CROSS_DEB_ARCH libxcb-xfixes0-dev:$CROSS_DEB_ARCH",
-]
-
-[target.riscv64gc-unknown-linux-gnu]
-pre-build = [
-    "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get install --assume-yes libxcb-render0-dev:$CROSS_DEB_ARCH libxcb-shape0-dev:$CROSS_DEB_ARCH libxcb-xfixes0-dev:$CROSS_DEB_ARCH",
-]
+# Intentionally empty (apart from this comment).
+#
+# Previously this file pre-installed `libxcb-*-dev:<target>` inside
+# the cross Docker image so `arboard` could find the headers at
+# cross-compile time.  That turned out to be unnecessary — `arboard`
+# uses `x11rb` for X11 and `wl-clipboard-rs` for Wayland, both
+# pure-Rust protocol implementations that don't link against C
+# libxcb.  And the install *broke* the riscv64 build: cross 0.2.5
+# ships an Ubuntu 18.04 (bionic) base whose APT repos have no
+# riscv64 ports, so `libxcb-*-dev:riscv64` is unresolvable.
+#
+# Keep this file around as the canonical place to pin per-target
+# images or add real pre-build steps when a future crate needs
+# them.
