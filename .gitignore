@@ -158,3 +158,6 @@ bitaiir.toml
 
 # Local Claude Code project briefing — machine-specific, never committed
 CLAUDE.md
+
+# Claude Code local settings (tool permissions, per-machine)
+.claude/
