@@ -15,6 +15,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Opt into Node 24 now so every `uses:` JavaScript action runs on
+  # the newer runtime.  Node 20 is deprecated on GitHub Actions
+  # runners as of 2025-09 and is scheduled for removal; without this
+  # flag each action emits a deprecation warning.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   # ---------------------------------------------------------------------------
