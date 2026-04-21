@@ -34,6 +34,7 @@ mod log;
 mod peer_manager;
 mod rpc_auth;
 mod tls;
+#[cfg(feature = "tui")]
 mod tui;
 
 #[derive(Parser)]
@@ -201,7 +202,11 @@ async fn main() {
     }
 
     // Create the TUI events channel early so the unified log module
-    // can send to the TUI from the very first banner line.
+    // can send to the TUI from the very first banner line.  In
+    // headless builds `log_rx` is unused (the TUI would own it);
+    // suppress the warning instead of cfg-gating the channel itself
+    // because the mining thread keeps using `log_tx` either way.
+    #[cfg_attr(not(feature = "tui"), allow(unused_variables))]
     let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
     let events_sender: Option<std::sync::mpsc::Sender<String>> = if args.interactive {
         Some(log_tx.clone())
@@ -1133,6 +1138,24 @@ async fn main() {
 
     // --- Wait for shutdown / interactive REPL ----------------------------- //
 
+    // When the `tui` feature is off, `--interactive` is still parsed
+    // (consistent CLI surface across builds) but there's no REPL to
+    // launch — fail loudly rather than silently running headless.
+    #[cfg(not(feature = "tui"))]
+    if args.interactive {
+        eprintln!(
+            "Error: -i / --interactive is not available in this bitaiird build.\n\n\
+             This binary was compiled without the interactive TUI (cargo \
+             --no-default-features) to produce a smaller server-class image.\n\n\
+             Options:\n\
+             \x20 • Run the daemon without -i, then use `bitaiir-cli` to talk to it.\n\
+             \x20 • Rebuild with the TUI feature:\n\
+             \x20       cargo build --release --bin bitaiird",
+        );
+        std::process::exit(1);
+    }
+
+    #[cfg(feature = "tui")]
     if args.interactive {
         let repl_rpc_addr = args.rpc_addr.clone();
         let repl_shutdown = shutdown.clone();
@@ -1160,6 +1183,17 @@ async fn main() {
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
+        }
+    }
+
+    // In headless builds `args.interactive` was rejected above, so
+    // we're guaranteed to be in daemon mode here — just wait for
+    // shutdown.
+    #[cfg(not(feature = "tui"))]
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if shutdown.load(Ordering::Relaxed) {
+            break;
         }
     }
 

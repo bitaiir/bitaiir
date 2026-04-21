@@ -109,6 +109,34 @@ jobs:
         run: cargo test --workspace --locked
 
   # -----------------------------------------------------------------------
+  # Headless build check.  Guards against accidentally putting code
+  # outside `#[cfg(feature = "tui")]` that pulls in `arboard` /
+  # `crossterm`, which would defeat the `--no-default-features`
+  # build used for container / server / RISC-V deployments.
+  # -----------------------------------------------------------------------
+  build-headless:
+    name: build (headless)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: headless
+
+      - name: cargo build --no-default-features
+        run: cargo build -p bitaiir-daemon --no-default-features --locked
+
+      - name: cargo clippy --no-default-features
+        run: cargo clippy -p bitaiir-daemon --no-default-features --all-targets --locked -- -D warnings
+
+  # -----------------------------------------------------------------------
   # Multi-node integration tests.
   #
   # Each scenario in `crates/bitaiir-daemon/tests/multinode.rs`
