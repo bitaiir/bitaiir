@@ -50,6 +50,35 @@ fn p2p_addr(node: &TestNode) -> String {
     format!("127.0.0.1:{}", node.p2p_port)
 }
 
+/// Wait until `leader` and `follower` converge on the same tip
+/// hash at the same height.  Needed because the mining loop is
+/// async: even after `set_mining(false)`, the miner may finalize
+/// one more block before observing the stop signal, so a tip
+/// captured earlier can silently be overtaken.  Polls leader's
+/// current height every 500 ms and requires both the height and
+/// the hash to agree.
+async fn wait_for_convergence(leader: &TestNode, follower: &TestNode, timeout: Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        let l_height = leader.height().await;
+        if follower
+            .wait_for_height(l_height, Duration::from_secs(2))
+            .await
+            .is_ok()
+            && leader.tip_hash().await == follower.tip_hash().await
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        leader.tip_hash().await,
+        follower.tip_hash().await,
+        "leader and follower never converged on the same tip within {:?}",
+        timeout,
+    );
+}
+
 // ===========================================================================
 // 1. Initial sync
 // ===========================================================================
@@ -70,7 +99,7 @@ async fn sync_empty_node_catches_up() {
         .await
         .expect("B should sync to height 5");
 
-    assert_eq!(a.tip_hash().await, b.tip_hash().await);
+    wait_for_convergence(&a, &b, Duration::from_secs(30)).await;
 }
 
 // ===========================================================================
@@ -152,18 +181,7 @@ async fn blocks_mined_on_a_propagate_to_b() {
         .expect("B receives live-mined blocks");
     a.set_mining(false).await;
 
-    // Mining is async — A may complete one more block after the
-    // stop signal arrives.  Poll both tips until they equalize.
-    for _ in 0..30 {
-        let ah = a.height().await;
-        if b.wait_for_height(ah, Duration::from_secs(2)).await.is_ok()
-            && a.tip_hash().await == b.tip_hash().await
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    assert_eq!(a.tip_hash().await, b.tip_hash().await);
+    wait_for_convergence(&a, &b, Duration::from_secs(30)).await;
 }
 
 // ===========================================================================
@@ -211,13 +229,14 @@ async fn reorg_converges_on_most_work_chain() {
     .await;
 
     // peer_manager ticks every 10 s; reorg includes downloading
-    // every block on A's chain sequentially.
+    // every block on A's chain sequentially.  Past `a_tip_before`
+    // is enough to know the reorg engaged — then converge on
+    // whatever tip A actually settled at (mining leak tolerance).
     b.wait_for_tip(&a_tip_before, Duration::from_secs(120))
         .await
         .expect("B reorgs onto A's heavier chain");
 
-    assert_eq!(a.height().await, b.height().await);
-    assert_eq!(a.tip_hash().await, b.tip_hash().await);
+    wait_for_convergence(&a, &b, Duration::from_secs(30)).await;
 }
 
 // ===========================================================================
@@ -316,7 +335,7 @@ async fn peer_resyncs_after_restart() {
         .await
         .expect("B catches up post-restart");
 
-    assert_eq!(a.tip_hash().await, b.tip_hash().await);
+    wait_for_convergence(&a, &b, Duration::from_secs(30)).await;
 }
 
 // ===========================================================================
@@ -342,5 +361,5 @@ async fn tls_rpc_does_not_affect_p2p_sync() {
         .await
         .expect("B syncs from a TLS-serving peer");
 
-    assert_eq!(a.tip_hash().await, b.tip_hash().await);
+    wait_for_convergence(&a, &b, Duration::from_secs(30)).await;
 }
