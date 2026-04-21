@@ -109,6 +109,44 @@ jobs:
         run: cargo test --workspace --locked
 
   # -----------------------------------------------------------------------
+  # Multi-node integration tests.
+  #
+  # Each scenario in `crates/bitaiir-daemon/tests/multinode.rs`
+  # spawns 2–3 real `bitaiird` processes on unique ports and
+  # drives them over JSON-RPC — full-stack (storage → chain →
+  # net → RPC → wallet) end-to-end coverage.  Tests are marked
+  # `#[ignore]` so the normal `test` job skips them (they would
+  # otherwise time out in dev mode because Argon2id at 64 MiB is
+  # ~20× slower unoptimized).  This job builds in release and
+  # passes `-- --ignored --test-threads=1`.
+  # -----------------------------------------------------------------------
+  integration-multinode:
+    name: integration (multinode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (arboard / X11)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: multinode
+
+      - name: cargo test --release --test multinode -- --ignored
+        run: cargo test --release --locked --test multinode -- --ignored --test-threads=1 --nocapture
+        timeout-minutes: 30
+
+  # -----------------------------------------------------------------------
   # RISC-V cross-compilation check.
   #
   # Validates that every crate in the workspace compiles for riscv64gc,

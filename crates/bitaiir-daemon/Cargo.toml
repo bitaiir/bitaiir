@@ -41,3 +41,11 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# Integration tests spawn real `bitaiird` processes and drive them
+# over JSON-RPC.  `tempfile` gives each node a clean data dir; the
+# other crates are already in the workspace for the daemon itself,
+# we just need them at test-time too.
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
