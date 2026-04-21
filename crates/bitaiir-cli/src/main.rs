@@ -466,8 +466,115 @@ async fn main() {
             println!("{}", serde_json::to_string_pretty(&value).unwrap());
         }
         Err(e) => {
-            eprintln!("RPC error: {e}");
+            eprintln!("{}", explain_rpc_error(&e.to_string(), &rpc_url));
             std::process::exit(1);
         }
     }
+}
+
+/// Raw jsonrpsee errors are terse and low-level ("client error
+/// (SendRequest)", "connection refused", etc.).  Look at a handful
+/// of common strings and emit a plain-language hint about what to
+/// check — usually scheme mismatch, daemon not running, or auth.
+fn explain_rpc_error(msg: &str, url: &str) -> String {
+    let is_http = url.starts_with("http://");
+    let is_https = url.starts_with("https://");
+    let lower = msg.to_ascii_lowercase();
+
+    // HTTP → HTTPS endpoint: hyper aborts the transport because
+    // the "response" is a TLS record.  Most common misconfigure.
+    if is_http
+        && (lower.contains("sendrequest")
+            || lower.contains("incompletemessage")
+            || lower.contains("channel closed"))
+    {
+        let host = url.trim_start_matches("http://");
+        return format!(
+            "RPC error: {msg}\n\n\
+             Hint: the daemon may be serving HTTPS (`[rpc] tls = true` in \
+             bitaiir.toml).  Retry with `--rpc-url https://{host}`.",
+        );
+    }
+
+    // Nothing on the other end of the socket (Linux / macOS).
+    if lower.contains("connection refused") || lower.contains("connectionrefused") {
+        return format!(
+            "RPC error: {msg}\n\n\
+             Hint: nothing is listening on {url}.  Is `bitaiird` running with \
+             the matching `--rpc-addr`?",
+        );
+    }
+
+    // Hyper wraps both "connection refused" and TLS handshake
+    // failures as `(Connect)`.  We can't distinguish them from the
+    // error string alone, so pair the hint to the URL scheme.
+    if lower.contains("(connect)") {
+        let (scheme_hint, alt_scheme) = if is_https {
+            (
+                "Hint: the daemon isn't answering TLS handshakes on this port.",
+                Some(("https://", "http://")),
+            )
+        } else if is_http {
+            (
+                "Hint: the daemon isn't accepting plain-HTTP connections on this port.",
+                Some(("http://", "https://")),
+            )
+        } else {
+            ("Hint: the daemon isn't responding on this port.", None)
+        };
+        let mut out = format!(
+            "RPC error: {msg}\n\n\
+             {scheme_hint}  Is `bitaiird` running with the matching \
+             `--rpc-addr`?",
+        );
+        if let Some((old, new)) = alt_scheme {
+            let host = url.trim_start_matches(old);
+            out.push_str(&format!(
+                "  If it is running, the other scheme might be right: \
+                 `--rpc-url {new}{host}`.",
+            ));
+        }
+        return out;
+    }
+
+    // Authentication rejected.
+    if lower.contains("401") || lower.contains("unauthorized") {
+        return format!(
+            "RPC error: {msg}\n\n\
+             Hint: RPC credentials were rejected.  The daemon either writes a \
+             cookie at `<data_dir>/.cookie` (default) or uses \
+             `[rpc] user`/`password` from bitaiir.toml — the CLI flags must \
+             match.  Try `--data-dir <path>` or `--rpc-user`/`--rpc-password`.",
+        );
+    }
+
+    // HTTPS → HTTP endpoint: TLS client got a plain HTTP response.
+    if is_https
+        && (lower.contains("invalid certificate")
+            || lower.contains("invaliddnsname")
+            || lower.contains("bad record mac"))
+    {
+        let host = url.trim_start_matches("https://");
+        return format!(
+            "RPC error: {msg}\n\n\
+             Hint: the daemon may be serving plain HTTP.  Retry with \
+             `--rpc-url http://{host}`.",
+        );
+    }
+
+    // Untrusted self-signed cert (no `rpc.cert` in data dir).
+    if lower.contains("unknownissuer")
+        || lower.contains("invalid peer certificate")
+        || lower.contains("webpki")
+    {
+        return format!(
+            "RPC error: {msg}\n\n\
+             Hint: TLS cert not trusted.  The CLI auto-loads \
+             `<data_dir>/rpc.cert`; point `--data-dir` at the daemon's data \
+             dir, use `--rpc-cafile <path>`, or `--insecure` to skip \
+             verification (not recommended).",
+        );
+    }
+
+    format!("RPC error: {msg}")
 }

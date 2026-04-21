@@ -1144,9 +1144,13 @@ async fn main() {
     #[cfg(not(feature = "tui"))]
     if args.interactive {
         eprintln!(
-            "error: this bitaiird binary was built without TUI support \
-             (cargo --no-default-features).  Remove -i / --interactive \
-             or install the build with `tui` feature enabled.",
+            "Error: -i / --interactive is not available in this bitaiird build.\n\n\
+             This binary was compiled without the interactive TUI (cargo \
+             --no-default-features) to produce a smaller server-class image.\n\n\
+             Options:\n\
+             \x20 • Run the daemon without -i, then use `bitaiir-cli` to talk to it.\n\
+             \x20 • Rebuild with the TUI feature:\n\
+             \x20       cargo build --release --bin bitaiird",
         );
         std::process::exit(1);
     }
