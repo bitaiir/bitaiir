@@ -69,6 +69,14 @@ cd bitaiir
 cargo build --release --bin bitaiird --bin bitaiir-cli
 ```
 
+**Headless build** (no TUI, no clipboard, no X11 runtime dep — smaller binary for server / container / RISC-V deployments):
+
+```bash
+cargo build --release -p bitaiir-daemon --no-default-features
+```
+
+Drops ~1 MB off the binary and the dependency on `libxcb` at runtime.  The `-i` / `--interactive` flag is rejected at startup in this build — use `bitaiir-cli` to talk to the RPC instead.
+
 ### Run (Interactive Mode)
 
 ```bash

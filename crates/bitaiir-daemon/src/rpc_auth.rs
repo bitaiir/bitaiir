@@ -50,7 +50,11 @@ pub struct RpcCredentials {
 
 impl RpcCredentials {
     /// Format `user:password` as an HTTP Basic Auth token (without
-    /// the `Basic ` prefix).  Callers wrap this in the header.
+    /// the `Basic ` prefix).  Only the TUI self-connects to its
+    /// own RPC, so this helper is gated behind the `tui` feature —
+    /// external callers use `bitaiir-cli`, which computes its own
+    /// token.
+    #[cfg(feature = "tui")]
     pub fn basic_token(&self) -> String {
         let raw = format!("{}:{}", self.user, self.password);
         base64::engine::general_purpose::STANDARD.encode(raw)
