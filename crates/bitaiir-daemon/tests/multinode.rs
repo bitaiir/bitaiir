@@ -204,7 +204,11 @@ async fn reorg_converges_on_most_work_chain() {
 
     let a_height_before = a.height().await;
     let b_height_before = b.height().await;
-    assert_ne!(a.tip_hash().await, b.tip_hash().await, "forks should differ");
+    assert_ne!(
+        a.tip_hash().await,
+        b.tip_hash().await,
+        "forks should differ"
+    );
     assert!(
         a_height_before > b_height_before,
         "A must have more work than B (A={a_height_before}, B={b_height_before})",
