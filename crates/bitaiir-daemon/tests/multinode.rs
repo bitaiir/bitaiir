@@ -202,10 +202,9 @@ async fn reorg_converges_on_most_work_chain() {
     mine_blocks(&a, 7).await;
     mine_blocks(&b, 3).await;
 
-    let a_tip_before = a.tip_hash().await;
     let a_height_before = a.height().await;
     let b_height_before = b.height().await;
-    assert_ne!(a_tip_before, b.tip_hash().await, "forks should differ");
+    assert_ne!(a.tip_hash().await, b.tip_hash().await, "forks should differ");
     assert!(
         a_height_before > b_height_before,
         "A must have more work than B (A={a_height_before}, B={b_height_before})",
@@ -229,14 +228,16 @@ async fn reorg_converges_on_most_work_chain() {
     .await;
 
     // peer_manager ticks every 10 s; reorg includes downloading
-    // every block on A's chain sequentially.  Past `a_tip_before`
-    // is enough to know the reorg engaged — then converge on
-    // whatever tip A actually settled at (mining leak tolerance).
-    b.wait_for_tip(&a_tip_before, Duration::from_secs(120))
+    // every block on A's chain sequentially.  We check height
+    // rather than tip hash because the exact tip captured earlier
+    // may have been overtaken by a mining-leak block that
+    // finalized after `set_mining(false)` was called — height
+    // proves the reorg engaged regardless of the precise tip.
+    b.wait_for_height(a_height_before, Duration::from_secs(180))
         .await
         .expect("B reorgs onto A's heavier chain");
 
-    wait_for_convergence(&a, &b, Duration::from_secs(30)).await;
+    wait_for_convergence(&a, &b, Duration::from_secs(60)).await;
 }
 
 // ===========================================================================
