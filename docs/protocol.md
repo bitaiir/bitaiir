@@ -1305,9 +1305,10 @@ before mainnet:
    stability is promised.
 5. **Replacement PoW** (section 9.8). If Argon2id is eventually
    circumvented, what replaces it and how is the fork activated?
-6. **Alias registry + escrow primitive.** Spec'd separately in a
-   forthcoming update to this document; both are targeted at commerce
-   UX and ship before v0.1.0 mainnet.
+6. **Alias and escrow calibration.** The alias registration fee
+   (1 AIIR provisional), renewal period (~6.3 M blocks), and escrow
+   size cap (M, N ≤ 15) need real-world validation before mainnet
+   launch. See sections 20 and 21.
 
 ---
 
@@ -1436,7 +1437,358 @@ ecosystem stops the protocol from reaching them.
 
 ---
 
-## 20. Change log
+## 20. Aliases — human-friendly name registry
+
+### 20.1 Motivation
+
+BitAiir addresses (`aiir1…`) are 34-character strings that cannot be
+memorized or dictated over the phone. For a payment system that
+aspires to Pix-like UX, users need short, human-chosen names (the
+Pix equivalent of a CPF/phone/email key). **Aliases** are BitAiir's
+answer: a global, on-chain name-to-address mapping that any wallet
+can resolve locally, without a central registrar.
+
+### 20.2 Extended output format
+
+Aliases (and escrow, section 21) require richer output types than the
+current P2PKH model. The `TxOut` struct gains a one-byte discriminator
+and a variable payload:
+
+```rust
+struct TxOut {
+    amount: Amount,
+    output_type: u8,
+    payload: Vec<u8>,
+}
+```
+
+| `output_type` | Name              | Payload format                   |
+| ------------- | ----------------- | -------------------------------- |
+| `0`           | P2PKH             | `recipient_hash: [u8; 20]`       |
+| `1`           | Escrow            | `EscrowParams` (section 21)      |
+| `2`           | Alias             | `AliasParams` (section 20.4)     |
+
+Type `0` is byte-compatible with the pre-alias encoding: a node that
+has never seen an alias or escrow interprets every existing output
+exactly as before. Unrecognized `output_type` values cause the
+enclosing transaction to be rejected as invalid — there is no
+`OP_NOP`-style soft-fork path.
+
+### 20.3 Name rules
+
+An alias name is a UTF-8 string subject to the following constraints:
+
+| Rule                        | Constraint                                 |
+| --------------------------- | ------------------------------------------ |
+| Length                      | 1 – 32 bytes                               |
+| Character set               | ASCII lowercase `a-z`, digits `0-9`, `-`, `_` |
+| First character             | Must be a letter (`a-z`)                   |
+| Consecutive punctuation     | No `--` or `__`                            |
+| Last character              | Must be alphanumeric (`a-z`, `0-9`)        |
+
+Names are case-insensitive but stored and compared in lowercase. A
+registration for `Alice` normalizes to `alice` before consensus
+validation.
+
+### 20.4 Alias output — `AliasParams`
+
+```rust
+struct AliasParams {
+    name: Vec<u8>,              // 1–32 bytes, validated per §20.3
+    target_hash: [u8; 20],      // HASH160 of the receiving address
+    owner_hash: [u8; 20],       // HASH160 of the key that can update / renew
+    expiry_height: u32,         // block height at which this alias expires
+}
+```
+
+An alias output (type `2`) is a **live UTXO** — the registration fee
+is locked, not burned. The alias exists as long as the UTXO is
+unspent and `expiry_height` has not been reached.
+
+### 20.5 Registration
+
+A transaction creates an alias by including an output with
+`output_type = 2` and a valid `AliasParams`:
+
+1. `name` passes every rule in §20.3.
+2. `amount ≥ ALIAS_REGISTRATION_FEE` (**1 AIIR**, provisional).
+3. `expiry_height = current_height + ALIAS_PERIOD`.
+   `ALIAS_PERIOD` is **6,300,000 blocks** (~1 year at 5 s/block),
+   provisional.
+4. No unspent alias output with the same `name` exists in the UTXO
+   set at the point of inclusion (name must be available or expired
+   and spent in the same block).
+
+The locked AIIR is not destroyed — it can be reclaimed by the owner
+(§20.6, §20.7).
+
+### 20.6 Update and renewal
+
+The owner spends the existing alias UTXO (providing a signature
+under the key whose `hash160` matches `owner_hash`) and creates a
+new alias output in the same transaction:
+
+- **Update:** change `target_hash` (point the alias at a different
+  address). `expiry_height` may be extended by up to `ALIAS_PERIOD`
+  from the current block height.
+- **Renew:** keep the same `target_hash`, extend `expiry_height`.
+- **Transfer ownership:** change `owner_hash`.
+
+The replacement output must carry at least `ALIAS_REGISTRATION_FEE`
+and satisfy all registration rules. The owner may add AIIR to the
+output (increasing the locked amount) or recover excess above the
+minimum fee by splitting the value across the alias output and a
+regular P2PKH change output.
+
+### 20.7 Voluntary deregistration
+
+The owner spends the alias UTXO and does **not** create a replacement
+alias output with the same name. The locked AIIR returns to the owner
+as normal P2PKH change. The name becomes immediately available for
+re-registration by anyone.
+
+### 20.8 Expiry and reclamation
+
+After `expiry_height` the alias UTXO becomes **anyone-can-spend**:
+any transaction may consume it with an empty signature (the output's
+`owner_hash` check is skipped when `block_height > expiry_height`).
+This provides two incentives:
+
+1. Owners renew before expiry to keep their name and their locked
+   AIIR.
+2. After expiry, scavengers reclaim the locked AIIR and free the
+   name — garbage-collecting the UTXO set in exchange for a bounty.
+
+A grace period of **50,000 blocks** (~2.9 days) is applied: between
+`expiry_height` and `expiry_height + 50,000` the UTXO is still
+owner-only-spendable; anyone-can-spend takes effect only after the
+grace period. This prevents accidental name loss from a missed
+renewal by a few blocks.
+
+### 20.9 Consensus state — alias index
+
+Nodes maintain a secondary index mapping `name → outpoint` alongside
+the UTXO set. This index is deterministic — it is updated atomically
+with the UTXO set during block application and reorg. The index is
+**not** a consensus output; it is derived state that any node can
+recompute by replaying the chain. Its only purpose is to make alias
+lookups O(1) for wallets and RPC callers.
+
+### 20.10 Resolution
+
+A wallet encountering an alias name (for example `@alice` in the
+`sendtoaddress` field) resolves it locally:
+
+1. Strip the `@` prefix (the `@` is a UX convention, not stored
+   on-chain).
+2. Normalize to lowercase.
+3. Look up the name in the alias index.
+4. If found and not expired: use the `target_hash` as the recipient.
+5. If not found or expired: reject with "alias not registered" /
+   "alias expired".
+
+Resolution is a **local read** on the node's own chain state. No
+network round trip is needed.
+
+### 20.11 Anti-squat rationale
+
+The design intentionally avoids tiered pricing (short names cost
+more) or auction mechanisms — both add UX complexity with marginal
+benefit. The flat 1 AIIR lock plus annual renewal is sufficient:
+
+- Registering 1,000 names locks 1,000 AIIR.
+- Forgetting to renew means losing the AIIR to scavengers.
+- The renewal cadence is long enough to be painless for real users
+  but costly enough to discourage name warehousing at scale.
+
+Premium names (single-character, common words) will trade at market
+prices off-chain. The protocol does not try to price them "fairly" —
+that is a market function, not a consensus function.
+
+---
+
+## 21. Escrow — N-of-M multisig with timeout
+
+### 21.1 Motivation
+
+BitAiir's commerce positioning ("Pix P2P descentralizado com escrow
+nativo") requires a **single consensus-level primitive** that covers
+every common buy/sell variation — from a simple 2-of-3 arbitrated
+purchase to a 4-of-7 corporate approval. The escrow primitive is
+that single building block. Wallets wrap it in UX templates
+("compra de produto", "serviço com milestones") but the chain only
+ever sees a generic escrow UTXO.
+
+### 21.2 Design principles
+
+1. **One opcode, many templates.** The chain does not know what a
+   "purchase" or a "freelance milestone" is. It enforces M-of-N
+   signatures before a timeout and single-sig refund after. All
+   higher-level semantics are a wallet concern.
+2. **Timeout is the universal escape valve.** Every escrow expires.
+   Funds are never permanently locked, even if all N signers vanish.
+3. **No Turing-complete scripts.** The escrow primitive is a
+   fixed-format spending rule, not a programmable contract. This
+   keeps the attack surface bounded and audit cost low.
+
+### 21.3 Escrow output — `EscrowParams`
+
+An escrow output (`output_type = 1`) encodes the following parameters
+in its `payload`:
+
+```rust
+struct EscrowParams {
+    m: u8,                               // required signatures (1 ≤ m ≤ n)
+    pubkey_hashes: Vec<[u8; 20]>,        // N signer HASH160 values
+    timeout_height: u32,                 // block height after which refund is enabled
+    refund_hash: [u8; 20],              // HASH160 of the refund recipient
+}
+```
+
+**Constraints** (consensus-enforced):
+
+| Parameter         | Constraint                                  |
+| ----------------- | ------------------------------------------- |
+| `m`               | 1 ≤ `m` ≤ `n`                              |
+| `n` (len of list) | 1 ≤ `n` ≤ 15                               |
+| `timeout_height`  | Must be strictly greater than current height|
+| `pubkey_hashes`   | All entries must be distinct (no duplicates) |
+| `refund_hash`     | Non-zero (not `[0u8; 20]`)                  |
+| `amount`          | Must be positive (> 0 atomic units)         |
+
+Any escrow output that violates these constraints makes the enclosing
+transaction invalid.
+
+### 21.4 Spending path 1 — M-of-N release (before timeout)
+
+At any block height **≤ `timeout_height`**, an escrow UTXO can be
+spent by providing M valid signatures from M distinct keys whose
+HASH160 values appear in `pubkey_hashes`.
+
+The spending `TxIn` encodes the multi-sig data in its existing fields:
+
+```
+signature = sig_1 || sig_2 || ... || sig_M    (M × 64 bytes)
+pubkey    = pk_1  || pk_2  || ... || pk_M     (M × 33 bytes, compressed)
+```
+
+Consensus validation:
+
+1. Parse `pubkey` as M 33-byte compressed public keys.
+2. For each `pk_i`, verify `hash160(pk_i) ∈ pubkey_hashes`.
+3. Verify all M pubkey hashes are **distinct** — no double-signing
+   with the same key.
+4. Parse `signature` as M 64-byte compact ECDSA signatures.
+5. Verify each `sig_i` against the transaction sighash under `pk_i`.
+
+If all checks pass, the output is spent. The value flows into the
+spending transaction's outputs as with any normal spend.
+
+### 21.5 Spending path 2 — refund (after timeout)
+
+At any block height **> `timeout_height`**, the escrow UTXO can also
+be spent by a **single signature** from the refund key:
+
+```
+signature = sig_refund                (64 bytes)
+pubkey    = pk_refund                 (33 bytes, compressed)
+```
+
+Consensus validation:
+
+1. Verify `hash160(pk_refund) == refund_hash`.
+2. Verify `sig_refund` is valid for the transaction sighash under
+   `pk_refund`.
+
+The M-of-N path remains valid after timeout as well — the refund
+path is additive, not exclusive. This means the N signers can still
+release funds cooperatively even after the timeout has passed.
+
+### 21.6 Common escrow patterns
+
+The escrow primitive is generic. Wallets configure it for specific
+use cases:
+
+| Pattern                  | M | N | Signers                             | Timeout   |
+| ------------------------ | - | - | ----------------------------------- | --------- |
+| Arbitrated purchase      | 2 | 3 | buyer, seller, arbitrator           | 30 days   |
+| Direct trade (no arb.)   | 2 | 2 | buyer, seller                       | 14 days   |
+| Group buy                | 3 | 5 | participants + organizer            | 60 days   |
+| Corporate approval       | 4 | 7 | board members                       | 90 days   |
+| Freelance milestone      | 2 | 3 | client, freelancer, platform        | per stage |
+| Chain of escrows         | 2 | 3 | same as above, one per milestone    | staged    |
+
+**Arbitrated purchase (2-of-3)** covers ~90% of commerce. The flow:
+
+1. Buyer creates an escrow output with
+   `{m=2, pubkey_hashes=[buyer, seller, arbitrator], timeout, refund=buyer}`.
+2. **Happy path:** buyer receives the goods, buyer + seller both sign →
+   funds go to seller. Arbitrator never involved.
+3. **Dispute:** buyer files dispute; arbitrator reviews evidence.
+   Arbitrator + buyer sign → refund. Or arbitrator + seller sign →
+   release. Only 2 of 3 are needed.
+4. **Timeout:** if nobody cooperates within the timeout window, buyer
+   reclaims via the refund path.
+
+### 21.7 Milestone chains
+
+A freelance contract with 3 deliverables can be modeled as 3
+independent escrow UTXOs created in a single transaction, each with
+its own timeout and (potentially) its own arbitrator. The client funds
+all 3 up front; each milestone releases independently.
+
+The chain sees 3 generic escrow outputs — the "milestone" semantics
+are a wallet-level label. There is no consensus-level notion of
+"linked escrows" or "workflow". This keeps the protocol simple and
+avoids the Turing-complete-contract trap.
+
+### 21.8 Arbitrator incentives
+
+The protocol does not mandate arbitrator fees — that is between the
+parties. However, a recommended wallet convention is:
+
+- The escrow output pays to the arbitrator a small fraction (e.g.,
+  1 %) of the total value as a **separate P2PKH output** in the
+  release or refund transaction. The arbitrator's willingness to sign
+  the release is the consideration for the fee.
+- Arbitrators build on-chain reputation: wallet UIs can display the
+  number of escrows an arbitrator has co-signed, the dispute rate,
+  and the average resolution time — all derived from chain data.
+
+### 21.9 Honest about fraud
+
+The fair-exchange impossibility theorem is real: no protocol can
+eliminate fraud for physical goods without some trust anchor. BitAiir
+does not claim otherwise. The strategy is to make fraud **costly and
+visible**:
+
+- Reputation-weighted arbitrators (publicly auditable from chain
+  history).
+- Public dispute resolution (escrow spending patterns are visible
+  on-chain).
+- Slashable arbitrator deposits (an arbitrator can lock a bond in
+  their own escrow as a "skin in the game" signal — not enforced by
+  consensus, but verifiable by wallets).
+
+This is the same social pattern as eBay / Mercado Livre, but
+decentralized. Tag line: "comércio com rede de segurança", not
+"mágica anti-fraude".
+
+### 21.10 What this is NOT
+
+- **Not a smart contract.** There is no on-chain state machine, no
+  loops, no conditionals beyond "M-of-N or timeout". This is
+  deliberate — see section 0 goal 7 (implementation simplicity).
+- **Not an investment vehicle.** Escrow is for products and services,
+  not for financial instruments. Framing escrow as "lock your AIIR
+  for a yield" would invite securities classification; the protocol
+  explicitly avoids this.
+- **Not fraud-proof.** It's fraud-resistant via economic incentives
+  and social reputation, not via cryptographic magic.
+
+---
+
+## 22. Change log
 
 | Date       | Version | Change                                                            |
 | ---------- | ------- | ----------------------------------------------------------------- |
@@ -1451,3 +1803,6 @@ ecosystem stops the protocol from reaching them.
 | 2026-04-21 | draft   | Add section 14 (wallet): HD BIP32/39/44 at path `m/44'/8888'/0'/0/<index>`, AES-256-GCM + Argon2id at rest. |
 | 2026-04-21 | draft   | Add section 15 (RPC interface): cookie auth, config-based auth + IP allowlist, opt-in TLS with self-signed or operator-provided cert. |
 | 2026-04-21 | draft   | Reduce open-questions list: DNS seeds have code structure, P2P plaintext decided for v1, genesis determinism resolves the earlier "genesis contents" open question. |
+| 2026-04-21 | draft   | Add extended output format (`output_type` discriminator on `TxOut`): type 0 = P2PKH (current), type 1 = escrow, type 2 = alias. Prerequisite for sections 20 and 21. |
+| 2026-04-21 | draft   | Add section 20 (aliases): on-chain name registry with 1 AIIR locked registration, ~1-year renewal, owner-update, anyone-can-spend after grace period, anti-squat via flat fee + expiry. |
+| 2026-04-21 | draft   | Add section 21 (escrow N-of-M): single consensus primitive for commerce — M-of-N multisig release before timeout, single-sig refund after timeout, N ≤ 15, common patterns for arbitrated purchase / milestone / group buy. |
