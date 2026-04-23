@@ -35,4 +35,7 @@ pub use error::{Error, Result};
 pub use hash::Hash256;
 pub use merkle::merkle_root;
 pub use network::Network;
-pub use transaction::{OutPoint, Transaction, TxIn, TxOut};
+pub use transaction::{
+    ALIAS_GRACE_PERIOD, ALIAS_PERIOD, ALIAS_REGISTRATION_FEE, AliasParams, OUTPUT_TYPE_ALIAS,
+    OUTPUT_TYPE_ESCROW, OUTPUT_TYPE_P2PKH, OutPoint, Transaction, TxIn, TxOut, validate_alias_name,
+};

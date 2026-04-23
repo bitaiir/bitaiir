@@ -64,10 +64,7 @@ pub fn mine_genesis() -> Block {
             pubkey: Vec::new(),
             sequence: u32::MAX,
         }],
-        outputs: vec![TxOut {
-            amount: reward,
-            recipient_hash,
-        }],
+        outputs: vec![TxOut::p2pkh(reward, recipient_hash)],
         locktime: 0,
         pow_nonce: 0,
         pow_priority: 1,

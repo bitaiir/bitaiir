@@ -127,7 +127,10 @@ pub fn validate_transaction(
 
         // Check that the pubkey hashes to the UTXO's recipient_hash.
         let pubkey_hash = hash160(&input.pubkey);
-        if pubkey_hash != utxo.recipient_hash {
+        let utxo_hash = utxo
+            .recipient_hash()
+            .ok_or(Error::InvalidOutputType(input.prev_out))?;
+        if pubkey_hash != utxo_hash {
             return Err(Error::PubkeyMismatch(input.prev_out));
         }
 
@@ -154,6 +157,50 @@ pub fn validate_transaction(
             inputs: input_total,
             outputs: output_total,
         });
+    }
+
+    // Rule: alias outputs must pass name + fee + uniqueness checks.
+    for output in &tx.outputs {
+        if output.is_alias() {
+            validate_alias_output(output, utxo_set, current_height)?;
+        }
+        if output.output_type != bitaiir_types::OUTPUT_TYPE_P2PKH
+            && output.output_type != bitaiir_types::OUTPUT_TYPE_ALIAS
+        {
+            return Err(Error::UnknownOutputType(output.output_type));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_alias_output(
+    output: &bitaiir_types::TxOut,
+    utxo_set: &UtxoSet,
+    current_height: u64,
+) -> Result<()> {
+    let params = output.alias_params().ok_or(Error::MalformedAliasPayload)?;
+
+    bitaiir_types::validate_alias_name(&params.name).map_err(Error::InvalidAliasName)?;
+
+    if output.amount.to_atomic() < bitaiir_types::ALIAS_REGISTRATION_FEE.to_atomic() {
+        return Err(Error::AliasFeeInsufficient);
+    }
+
+    if params.expiry_height <= current_height as u32 {
+        return Err(Error::AliasExpiryInPast(params.expiry_height));
+    }
+    let max_expiry = current_height as u32 + bitaiir_types::ALIAS_PERIOD + 20;
+    if params.expiry_height > max_expiry {
+        return Err(Error::AliasExpiryTooFar {
+            max: max_expiry,
+            got: params.expiry_height,
+        });
+    }
+
+    let name = String::from_utf8_lossy(&params.name).to_lowercase();
+    if utxo_set.alias_exists(&name) {
+        return Err(Error::AliasAlreadyRegistered(name));
     }
 
     Ok(())
@@ -391,7 +438,7 @@ pub fn validate_block(
 /// Compute the median-time-past: the median of the timestamps of the
 /// previous `MEDIAN_TIME_SPAN` blocks (or fewer, if the chain is
 /// shorter). Used by rule 4.
-fn median_time_past(chain: &Chain) -> u64 {
+pub(crate) fn median_time_past(chain: &Chain) -> u64 {
     let height = chain.height();
     let count = MEDIAN_TIME_SPAN.min(height as usize + 1);
 
@@ -770,10 +817,7 @@ mod tests {
         let tx = bitaiir_types::Transaction {
             version: 1,
             inputs: vec![],
-            outputs: vec![TxOut {
-                amount: Amount::from_atomic(1),
-                recipient_hash: [0; 20],
-            }],
+            outputs: vec![TxOut::p2pkh(Amount::from_atomic(1), [0; 20])],
             locktime: 0,
             pow_nonce: 0,
             pow_priority: 1,

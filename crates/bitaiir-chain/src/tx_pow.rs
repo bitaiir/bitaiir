@@ -199,10 +199,10 @@ mod tests {
                 pubkey: vec![0x02; 33],
                 sequence: u32::MAX,
             }],
-            outputs: vec![TxOut {
-                amount: Amount::from_atomic(50 * 100_000_000),
-                recipient_hash: [0x99; 20],
-            }],
+            outputs: vec![TxOut::p2pkh(
+                Amount::from_atomic(50 * 100_000_000),
+                [0x99; 20],
+            )],
             locktime: 0,
             pow_nonce: 0,
             pow_priority: 0,

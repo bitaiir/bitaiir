@@ -63,7 +63,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("getnewaddress", "Generate a new address"),
     ("getbalance", "Show address balance"),
     ("listaddresses", "List all wallet addresses"),
-    ("sendtoaddress", "Send AIIR to address"),
+    ("sendtoaddress", "Send AIIR to address or @alias"),
     ("getmempoolinfo", "Show mempool status"),
     ("gettransaction", "Look up tx by txid"),
     ("gettransactionhistory", "Tx history for address"),
@@ -80,6 +80,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("walletlock", "Lock wallet immediately"),
     ("getmnemonic", "Show HD seed phrase (24 words)"),
     ("importmnemonic", "Restore wallet from seed phrase"),
+    ("registeralias", "Register an alias (name → address)"),
+    ("resolvealias", "Resolve an alias to its address"),
+    ("listaliases", "List all registered aliases"),
     ("stop", "Stop the daemon"),
     ("help", "Show all commands"),
     ("exit", "Exit BitAiir"),
@@ -1486,11 +1489,11 @@ fn handle_command(
             "  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"
         )),
         "sendtoaddress" if parts.len() < 3 => Some(format!(
-            "  {DIM}Usage: /sendtoaddress <addr> <amount> [priority]{RESET}"
+            "  {DIM}Usage: /sendtoaddress <addr|@alias> <amount> [priority]{RESET}"
         )),
-        "sendtoaddress" if !is_valid_address(parts[1]) => Some(format!(
-            "  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"
-        )),
+        "sendtoaddress" if !parts[1].starts_with('@') && !is_valid_address(parts[1]) => Some(
+            format!("  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"),
+        ),
         "sendtoaddress" if parts[2].parse::<f64>().unwrap_or(0.0) <= 0.0 => {
             Some(format!("  {RED}Error: amount must be > 0.{RESET}"))
         }
@@ -1625,6 +1628,24 @@ fn handle_command(
                 let phrase = parts[1..].join(" ");
                 client.request("importmnemonic", rpc_params![phrase]).await
             }
+            "registeralias" => {
+                if parts.len() < 3 {
+                    Ok(serde_json::json!("Usage: /registeralias <name> <address>"))
+                } else {
+                    let n = parts[1].clone();
+                    let a = parts[2].clone();
+                    client.request("registeralias", rpc_params![n, a]).await
+                }
+            }
+            "resolvealias" => {
+                if parts.len() < 2 {
+                    Ok(serde_json::json!("Usage: /resolvealias <name>"))
+                } else {
+                    let n = parts[1].clone();
+                    client.request("resolvealias", rpc_params![n]).await
+                }
+            }
+            "listaliases" => client.request("listaliases", rpc_params![]).await,
             "stop" => client.request("stop", rpc_params![]).await,
             other => Ok(serde_json::json!(format!(
                 "Unknown: '/{other}'. Type /help."

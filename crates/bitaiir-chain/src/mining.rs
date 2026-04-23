@@ -78,12 +78,19 @@ pub fn mine_block(
     // Determine the required difficulty.
     let bits = required_bits(chain, next_height);
 
+    // The block timestamp must be strictly greater than the median
+    // of the previous 11 blocks.  When blocks are mined sub-second
+    // the caller's wall-clock time can equal the MTP; bump to
+    // MTP + 1 in that case.
+    let mtp = crate::validation::median_time_past(chain);
+    let timestamp = network_time.max(mtp + 1);
+
     // Build the header template.
     let mut header = BlockHeader {
         version: 1,
         prev_block_hash: chain.tip(),
         merkle_root,
-        timestamp: network_time,
+        timestamp,
         bits,
         nonce: 0,
     };
@@ -297,10 +304,7 @@ fn build_coinbase(height: u64, recipient_hash: [u8; 20], amount: Amount) -> Tran
             pubkey: Vec::new(),
             sequence: u32::MAX,
         }],
-        outputs: vec![TxOut {
-            amount,
-            recipient_hash,
-        }],
+        outputs: vec![TxOut::p2pkh(amount, recipient_hash)],
         locktime: 0,
         pow_nonce: 0,
         pow_priority: 1,
@@ -318,10 +322,7 @@ fn build_genesis_coinbase(recipient_hash: [u8; 20], amount: Amount, message: &st
             pubkey: Vec::new(),
             sequence: u32::MAX,
         }],
-        outputs: vec![TxOut {
-            amount,
-            recipient_hash,
-        }],
+        outputs: vec![TxOut::p2pkh(amount, recipient_hash)],
         locktime: 0,
         pow_nonce: 0,
         pow_priority: 1,

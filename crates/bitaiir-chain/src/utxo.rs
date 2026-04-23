@@ -92,6 +92,10 @@ pub struct UtxoSet {
     /// can compute confirmation counts and display "confirmed" vs.
     /// "unconfirmed" splits.
     output_heights: HashMap<OutPoint, u64>,
+    /// Alias index: maps lowercase alias name to the outpoint of the
+    /// live alias UTXO.  Updated atomically with the UTXO set on
+    /// insert / remove so alias uniqueness is always consistent.
+    aliases: HashMap<String, OutPoint>,
 }
 
 impl UtxoSet {
@@ -101,6 +105,7 @@ impl UtxoSet {
             utxos: HashMap::new(),
             coinbase_heights: HashMap::new(),
             output_heights: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 
@@ -146,12 +151,55 @@ impl UtxoSet {
     /// Insert an output directly, used for bootstrapping or tests.
     /// Returns the previous occupant, if any.
     pub fn insert(&mut self, outpoint: OutPoint, txout: TxOut) -> Option<TxOut> {
-        self.utxos.insert(outpoint, txout)
+        self.insert_inner(outpoint, txout)
     }
 
     /// Remove an output directly, returning it if it was present.
     pub fn remove(&mut self, outpoint: &OutPoint) -> Option<TxOut> {
-        self.utxos.remove(outpoint)
+        self.remove_inner(outpoint)
+    }
+
+    fn insert_inner(&mut self, outpoint: OutPoint, txout: TxOut) -> Option<TxOut> {
+        if let Some(params) = txout.alias_params() {
+            let name = String::from_utf8_lossy(&params.name).to_lowercase();
+            self.aliases.insert(name, outpoint);
+        }
+        self.utxos.insert(outpoint, txout)
+    }
+
+    fn remove_inner(&mut self, outpoint: &OutPoint) -> Option<TxOut> {
+        let removed = self.utxos.remove(outpoint);
+        if let Some(ref txout) = removed {
+            if let Some(params) = txout.alias_params() {
+                let name = String::from_utf8_lossy(&params.name).to_lowercase();
+                self.aliases.remove(&name);
+            }
+        }
+        removed
+    }
+
+    /// Look up an alias name and return the outpoint of its UTXO.
+    pub fn alias_outpoint(&self, name: &str) -> Option<&OutPoint> {
+        self.aliases.get(&name.to_lowercase())
+    }
+
+    /// Resolve an alias name to its target HASH160.
+    pub fn resolve_alias(&self, name: &str) -> Option<[u8; 20]> {
+        let outpoint = self.alias_outpoint(name)?;
+        let txout = self.utxos.get(outpoint)?;
+        let params = txout.alias_params()?;
+        Some(params.target_hash)
+    }
+
+    /// Whether an alias name is currently registered (has an unspent
+    /// alias UTXO).
+    pub fn alias_exists(&self, name: &str) -> bool {
+        self.aliases.contains_key(&name.to_lowercase())
+    }
+
+    /// Iterate over all registered aliases: `(name, outpoint)`.
+    pub fn aliases(&self) -> impl Iterator<Item = (&String, &OutPoint)> {
+        self.aliases.iter()
     }
 
     /// Apply a transaction: remove every spent input and add every
@@ -178,7 +226,7 @@ impl UtxoSet {
             }
             self.coinbase_heights.remove(&input.prev_out);
             self.output_heights.remove(&input.prev_out);
-            if self.utxos.remove(&input.prev_out).is_none() {
+            if self.remove_inner(&input.prev_out).is_none() {
                 return Err(Error::MissingOutpoint(input.prev_out));
             }
         }
@@ -190,7 +238,7 @@ impl UtxoSet {
                 txid,
                 vout: vout as u32,
             };
-            self.utxos.insert(outpoint, *txout);
+            self.insert_inner(outpoint, txout.clone());
             self.output_heights.insert(outpoint, height);
             if is_coinbase {
                 self.coinbase_heights.insert(outpoint, height);
@@ -224,10 +272,11 @@ impl UtxoSet {
                     continue;
                 }
                 let outpoint = input.prev_out;
-                let txout = *self
+                let txout = self
                     .utxos
                     .get(&outpoint)
-                    .ok_or(Error::MissingOutpoint(outpoint))?;
+                    .ok_or(Error::MissingOutpoint(outpoint))?
+                    .clone();
                 let created_at_height = self.output_heights.get(&outpoint).copied().unwrap_or(0);
                 let was_coinbase = self.coinbase_heights.contains_key(&outpoint);
                 spent_inputs.push(SpentInput {
@@ -237,7 +286,7 @@ impl UtxoSet {
                     was_coinbase,
                 });
 
-                self.utxos.remove(&outpoint);
+                self.remove_inner(&outpoint);
                 self.output_heights.remove(&outpoint);
                 self.coinbase_heights.remove(&outpoint);
             }
@@ -249,7 +298,7 @@ impl UtxoSet {
                     txid,
                     vout: vout as u32,
                 };
-                self.utxos.insert(outpoint, *txout);
+                self.insert_inner(outpoint, txout.clone());
                 self.output_heights.insert(outpoint, height);
                 if is_coinbase {
                     self.coinbase_heights.insert(outpoint, height);
@@ -290,7 +339,7 @@ impl UtxoSet {
                     txid,
                     vout: vout as u32,
                 };
-                self.utxos.remove(&outpoint);
+                self.remove_inner(&outpoint);
                 self.output_heights.remove(&outpoint);
                 self.coinbase_heights.remove(&outpoint);
             }
@@ -298,7 +347,7 @@ impl UtxoSet {
 
         // Restore every spent input back to how it was.
         for spent in &undo.spent_inputs {
-            self.utxos.insert(spent.outpoint, spent.txout);
+            self.insert_inner(spent.outpoint, spent.txout.clone());
             self.output_heights
                 .insert(spent.outpoint, spent.created_at_height);
             if spent.was_coinbase {
@@ -346,10 +395,7 @@ mod tests {
             txid: Hash256::from_bytes([0x01; 32]),
             vout: 0,
         };
-        let txout = TxOut {
-            amount: Amount::from_atomic(123),
-            recipient_hash: [0x42; 20],
-        };
+        let txout = TxOut::p2pkh(Amount::from_atomic(123), [0x42; 20]);
 
         assert!(set.insert(outpoint, txout).is_none());
         assert!(set.contains(&outpoint));

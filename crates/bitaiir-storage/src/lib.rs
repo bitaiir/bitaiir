@@ -644,10 +644,7 @@ mod tests {
                 pubkey: Vec::new(),
                 sequence: u32::MAX,
             }],
-            outputs: vec![TxOut {
-                amount: Amount::from_atomic(100),
-                recipient_hash: [tag as u8; 20],
-            }],
+            outputs: vec![TxOut::p2pkh(Amount::from_atomic(100), [tag as u8; 20])],
             locktime: 0,
             pow_nonce: 0,
             pow_priority: 1,
@@ -797,15 +794,12 @@ mod tests {
             txid: Hash256::from_bytes([0xaa; 32]),
             vout: 0,
         };
-        let seed_txout = TxOut {
-            amount: Amount::from_atomic(50),
-            recipient_hash: [0xbb; 20],
-        };
+        let seed_txout = TxOut::p2pkh(Amount::from_atomic(50), [0xbb; 20]);
         // Insert directly via apply_block with a coinbase that
         // creates this outpoint: easier is to just write through
         // a hand-rolled transaction.
         let mut seed_utxo = UtxoSet::new();
-        seed_utxo.insert(seed_op, seed_txout);
+        seed_utxo.insert(seed_op, seed_txout.clone());
         // Build a block that "spends" this seed UTXO.
         let spender_tx = Transaction {
             version: 1,
@@ -815,10 +809,7 @@ mod tests {
                 pubkey: Vec::new(),
                 sequence: u32::MAX,
             }],
-            outputs: vec![TxOut {
-                amount: Amount::from_atomic(50),
-                recipient_hash: [0xcc; 20],
-            }],
+            outputs: vec![TxOut::p2pkh(Amount::from_atomic(50), [0xcc; 20])],
             locktime: 0,
             pow_nonce: 0,
             pow_priority: 1,
