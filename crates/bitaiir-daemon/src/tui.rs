@@ -83,6 +83,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("registeralias", "Register an alias (name → address)"),
     ("resolvealias", "Resolve an alias to its address"),
     ("listaliases", "List all registered aliases"),
+    ("createescrow", "Lock AIIR in M-of-N escrow"),
+    ("refundescrow", "Refund an expired escrow"),
+    ("listescrows", "List all active escrows"),
     ("stop", "Stop the daemon"),
     ("help", "Show all commands"),
     ("exit", "Exit BitAiir"),
@@ -1646,6 +1649,36 @@ fn handle_command(
                 }
             }
             "listaliases" => client.request("listaliases", rpc_params![]).await,
+            "createescrow" => {
+                if parts.len() < 6 {
+                    Ok(serde_json::json!("Usage: /createescrow <amount> <m> <addr1,addr2,...> <timeout_blocks> <refund_addr>"))
+                } else {
+                    let amount: f64 = parts[1].parse().unwrap_or(0.0);
+                    let m: u8 = parts[2].parse().unwrap_or(0);
+                    let addrs: Vec<String> =
+                        parts[3].split(',').map(|s| s.to_string()).collect();
+                    let timeout: u32 = parts[4].parse().unwrap_or(0);
+                    let refund = parts[5].clone();
+                    client
+                        .request(
+                            "createescrow",
+                            rpc_params![amount, m, addrs, timeout, refund],
+                        )
+                        .await
+                }
+            }
+            "refundescrow" => {
+                if parts.len() < 3 {
+                    Ok(serde_json::json!("Usage: /refundescrow <txid> <vout>"))
+                } else {
+                    let txid = parts[1].clone();
+                    let vout: u32 = parts[2].parse().unwrap_or(0);
+                    client
+                        .request("refundescrow", rpc_params![txid, vout])
+                        .await
+                }
+            }
+            "listescrows" => client.request("listescrows", rpc_params![]).await,
             "stop" => client.request("stop", rpc_params![]).await,
             other => Ok(serde_json::json!(format!(
                 "Unknown: '/{other}'. Type /help."

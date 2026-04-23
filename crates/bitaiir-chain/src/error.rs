@@ -168,6 +168,50 @@ pub enum Error {
     #[error("alias already registered: {0}")]
     AliasAlreadyRegistered(String),
 
+    /// An escrow output payload could not be parsed.
+    #[error("malformed escrow payload")]
+    MalformedEscrowPayload,
+
+    /// Escrow M is invalid (0, or > N).
+    #[error("escrow m={m} invalid for n={n}")]
+    EscrowInvalidM { m: u8, n: u8 },
+
+    /// Escrow N is invalid (0, or > MAX_ESCROW_N).
+    #[error("escrow n={0} out of range")]
+    EscrowInvalidN(u8),
+
+    /// Escrow timeout_height is in the past.
+    #[error("escrow timeout {0} is in the past")]
+    EscrowTimeoutInPast(u32),
+
+    /// Escrow refund_hash is all zeros.
+    #[error("escrow refund_hash must not be zero")]
+    EscrowZeroRefundHash,
+
+    /// Escrow amount is zero.
+    #[error("escrow amount must be > 0")]
+    EscrowZeroAmount,
+
+    /// Escrow has duplicate signer hashes.
+    #[error("escrow pubkey_hashes contain duplicates")]
+    EscrowDuplicateSigner,
+
+    /// Trying to refund before the timeout has passed.
+    #[error("escrow refund before timeout for outpoint {0}")]
+    EscrowRefundBeforeTimeout(OutPoint),
+
+    /// Wrong number of signatures for M-of-N release.
+    #[error("escrow needs {expected_m} sigs, got {got_pks} pks / {got_sigs} sigs")]
+    EscrowWrongSigCount {
+        expected_m: u8,
+        got_pks: usize,
+        got_sigs: usize,
+    },
+
+    /// A signer's pubkey hash is not in the escrow's authorized list.
+    #[error("escrow signer not authorized for outpoint {0}")]
+    EscrowUnauthorizedSigner(OutPoint),
+
     /// The transaction's anti-spam pow_nonce does not meet the target.
     #[error("invalid transaction proof of work (anti-spam nonce)")]
     InvalidTxPow,

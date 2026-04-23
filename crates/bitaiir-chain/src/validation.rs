@@ -125,22 +125,9 @@ pub fn validate_transaction(
             }
         }
 
-        // Check that the pubkey hashes to the UTXO's recipient_hash.
-        let pubkey_hash = hash160(&input.pubkey);
-        let utxo_hash = utxo
-            .recipient_hash()
-            .ok_or(Error::InvalidOutputType(input.prev_out))?;
-        if pubkey_hash != utxo_hash {
-            return Err(Error::PubkeyMismatch(input.prev_out));
-        }
-
-        // Verify the ECDSA signature against the sighash.
-        let Ok(pubkey) = PublicKey::from_slice(&input.pubkey) else {
-            return Err(Error::InvalidInputSignature(input.prev_out));
-        };
-        if !pubkey.verify_digest(sighash.as_bytes(), &input.signature) {
-            return Err(Error::InvalidInputSignature(input.prev_out));
-        }
+        // Validate the spending authorization based on the UTXO's
+        // output type.
+        validate_spend(input, utxo, &sighash, current_height)?;
 
         input_total = input_total.saturating_add(utxo.amount.to_atomic());
     }
@@ -159,13 +146,17 @@ pub fn validate_transaction(
         });
     }
 
-    // Rule: alias outputs must pass name + fee + uniqueness checks.
+    // Rule: validate special output types.
     for output in &tx.outputs {
         if output.is_alias() {
             validate_alias_output(output, utxo_set, current_height)?;
         }
+        if output.is_escrow() {
+            validate_escrow_output(output, current_height)?;
+        }
         if output.output_type != bitaiir_types::OUTPUT_TYPE_P2PKH
             && output.output_type != bitaiir_types::OUTPUT_TYPE_ALIAS
+            && output.output_type != bitaiir_types::OUTPUT_TYPE_ESCROW
         {
             return Err(Error::UnknownOutputType(output.output_type));
         }
@@ -201,6 +192,156 @@ fn validate_alias_output(
     let name = String::from_utf8_lossy(&params.name).to_lowercase();
     if utxo_set.alias_exists(&name) {
         return Err(Error::AliasAlreadyRegistered(name));
+    }
+
+    Ok(())
+}
+
+fn validate_spend(
+    input: &bitaiir_types::TxIn,
+    utxo: &bitaiir_types::TxOut,
+    sighash: &bitaiir_types::Hash256,
+    current_height: u64,
+) -> Result<()> {
+    match utxo.output_type {
+        bitaiir_types::OUTPUT_TYPE_P2PKH => {
+            let utxo_hash = utxo
+                .recipient_hash()
+                .ok_or(Error::InvalidOutputType(input.prev_out))?;
+            let pubkey_hash = hash160(&input.pubkey);
+            if pubkey_hash != utxo_hash {
+                return Err(Error::PubkeyMismatch(input.prev_out));
+            }
+            let Ok(pubkey) = PublicKey::from_slice(&input.pubkey) else {
+                return Err(Error::InvalidInputSignature(input.prev_out));
+            };
+            if !pubkey.verify_digest(sighash.as_bytes(), &input.signature) {
+                return Err(Error::InvalidInputSignature(input.prev_out));
+            }
+            Ok(())
+        }
+        bitaiir_types::OUTPUT_TYPE_ESCROW => {
+            validate_escrow_spend(input, utxo, sighash, current_height)
+        }
+        bitaiir_types::OUTPUT_TYPE_ALIAS => {
+            let params = utxo
+                .alias_params()
+                .ok_or(Error::InvalidOutputType(input.prev_out))?;
+            let pubkey_hash = hash160(&input.pubkey);
+            let grace_end = params
+                .expiry_height
+                .saturating_add(bitaiir_types::ALIAS_GRACE_PERIOD);
+            if current_height as u32 > grace_end && input.signature.is_empty() {
+                return Ok(());
+            }
+            if pubkey_hash != params.owner_hash {
+                return Err(Error::PubkeyMismatch(input.prev_out));
+            }
+            let Ok(pubkey) = PublicKey::from_slice(&input.pubkey) else {
+                return Err(Error::InvalidInputSignature(input.prev_out));
+            };
+            if !pubkey.verify_digest(sighash.as_bytes(), &input.signature) {
+                return Err(Error::InvalidInputSignature(input.prev_out));
+            }
+            Ok(())
+        }
+        _ => Err(Error::UnknownOutputType(utxo.output_type)),
+    }
+}
+
+fn validate_escrow_output(output: &bitaiir_types::TxOut, current_height: u64) -> Result<()> {
+    let params = output
+        .escrow_params()
+        .ok_or(Error::MalformedEscrowPayload)?;
+
+    let n = params.pubkey_hashes.len();
+    if params.m == 0 || params.m as usize > n {
+        return Err(Error::EscrowInvalidM {
+            m: params.m,
+            n: n as u8,
+        });
+    }
+    if n == 0 || n > bitaiir_types::MAX_ESCROW_N {
+        return Err(Error::EscrowInvalidN(n as u8));
+    }
+    if params.timeout_height <= current_height as u32 {
+        return Err(Error::EscrowTimeoutInPast(params.timeout_height));
+    }
+    if params.refund_hash == [0u8; 20] {
+        return Err(Error::EscrowZeroRefundHash);
+    }
+    if output.amount.to_atomic() == 0 {
+        return Err(Error::EscrowZeroAmount);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for h in &params.pubkey_hashes {
+        if !seen.insert(h) {
+            return Err(Error::EscrowDuplicateSigner);
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_escrow_spend(
+    input: &bitaiir_types::TxIn,
+    utxo: &bitaiir_types::TxOut,
+    sighash: &bitaiir_types::Hash256,
+    current_height: u64,
+) -> Result<()> {
+    let params = utxo
+        .escrow_params()
+        .ok_or(Error::InvalidOutputType(input.prev_out))?;
+
+    let sig_bytes = &input.signature;
+    let pk_bytes = &input.pubkey;
+
+    if pk_bytes.len() == 33 && sig_bytes.len() == 64 {
+        if current_height as u32 <= params.timeout_height {
+            return Err(Error::EscrowRefundBeforeTimeout(input.prev_out));
+        }
+        let pubkey_hash = hash160(pk_bytes);
+        if pubkey_hash != params.refund_hash {
+            return Err(Error::PubkeyMismatch(input.prev_out));
+        }
+        let Ok(pubkey) = PublicKey::from_slice(pk_bytes) else {
+            return Err(Error::InvalidInputSignature(input.prev_out));
+        };
+        if !pubkey.verify_digest(sighash.as_bytes(), sig_bytes) {
+            return Err(Error::InvalidInputSignature(input.prev_out));
+        }
+        return Ok(());
+    }
+
+    let m = params.m as usize;
+    if pk_bytes.len() != m * 33 || sig_bytes.len() != m * 64 {
+        return Err(Error::EscrowWrongSigCount {
+            expected_m: params.m,
+            got_pks: pk_bytes.len() / 33,
+            got_sigs: sig_bytes.len() / 64,
+        });
+    }
+
+    let mut used_hashes: std::collections::HashSet<[u8; 20]> = std::collections::HashSet::new();
+    for i in 0..m {
+        let pk_slice = &pk_bytes[i * 33..(i + 1) * 33];
+        let sig_slice = &sig_bytes[i * 64..(i + 1) * 64];
+
+        let pk_hash = hash160(pk_slice);
+        if !params.pubkey_hashes.contains(&pk_hash) {
+            return Err(Error::EscrowUnauthorizedSigner(input.prev_out));
+        }
+        if !used_hashes.insert(pk_hash) {
+            return Err(Error::EscrowDuplicateSigner);
+        }
+
+        let Ok(pubkey) = PublicKey::from_slice(pk_slice) else {
+            return Err(Error::InvalidInputSignature(input.prev_out));
+        };
+        if !pubkey.verify_digest(sighash.as_bytes(), sig_slice) {
+            return Err(Error::InvalidInputSignature(input.prev_out));
+        }
     }
 
     Ok(())
@@ -438,7 +579,7 @@ pub fn validate_block(
 /// Compute the median-time-past: the median of the timestamps of the
 /// previous `MEDIAN_TIME_SPAN` blocks (or fewer, if the chain is
 /// shorter). Used by rule 4.
-pub(crate) fn median_time_past(chain: &Chain) -> u64 {
+pub fn median_time_past(chain: &Chain) -> u64 {
     let height = chain.height();
     let count = MEDIAN_TIME_SPAN.min(height as usize + 1);
 

@@ -1000,16 +1000,16 @@ async fn main() {
                 header_printed = true;
             }
 
-            let timestamp = unix_now();
-
             // Snapshot (short write lock).
-            let (prev_hash, next_height, bits, user_txs) = {
+            let (prev_hash, next_height, bits, user_txs, timestamp) = {
                 let mut s = mining_state.blocking_write();
                 let h = s.chain.height() + 1;
                 let tip = s.chain.tip();
                 let b = bitaiir_chain::required_bits(&s.chain, h);
                 let txs = s.mempool.take_for_block(2000);
-                (tip, h, b, txs)
+                let mtp = bitaiir_chain::median_time_past(&s.chain);
+                let ts = unix_now().max(mtp + 1);
+                (tip, h, b, txs, ts)
             };
 
             // Mine with N parallel threads (NO lock held).
