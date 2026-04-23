@@ -341,7 +341,7 @@ impl Wallet {
 
         let mut total: u64 = 0;
         for (_, txout) in utxo.iter() {
-            if txout.recipient_hash == recipient_hash {
+            if txout.recipient_hash() == Some(recipient_hash) {
                 total = total.saturating_add(txout.amount.to_atomic());
             }
         }
@@ -361,7 +361,7 @@ impl Wallet {
 
         let mut total: u64 = 0;
         for (outpoint, txout) in utxo.iter() {
-            if txout.recipient_hash != recipient_hash {
+            if txout.recipient_hash() != Some(recipient_hash) {
                 continue;
             }
             if let Some(cb_height) = utxo.coinbase_height(outpoint) {
@@ -392,7 +392,7 @@ impl Wallet {
 
         let mut total: u64 = 0;
         for (outpoint, txout) in utxo.iter() {
-            if txout.recipient_hash != recipient_hash {
+            if txout.recipient_hash() != Some(recipient_hash) {
                 continue;
             }
             if pending.contains(outpoint) {
@@ -429,7 +429,7 @@ impl Wallet {
         let mut immature: u64 = 0;
 
         for (outpoint, txout) in utxo.iter() {
-            if txout.recipient_hash != recipient_hash {
+            if txout.recipient_hash() != Some(recipient_hash) {
                 continue;
             }
             let amount = txout.amount.to_atomic();
@@ -454,6 +454,10 @@ impl Wallet {
 
         (confirmed, unconfirmed, immature)
     }
+}
+
+fn rpc_err(msg: impl Into<String>) -> jsonrpsee::types::ErrorObjectOwned {
+    jsonrpsee::types::ErrorObjectOwned::owned(-1, msg.into(), None::<()>)
 }
 
 /// Decode a BitAiir address ("aiir...") to its 20-byte recipient_hash.
@@ -564,6 +568,15 @@ pub trait BitaiirApi {
     #[method(name = "importmnemonic")]
     async fn import_mnemonic(&self, phrase: String) -> RpcResult<serde_json::Value>;
 
+    #[method(name = "registeralias")]
+    async fn register_alias(&self, name: String, address: String) -> RpcResult<serde_json::Value>;
+
+    #[method(name = "resolvealias")]
+    async fn resolve_alias(&self, name: String) -> RpcResult<serde_json::Value>;
+
+    #[method(name = "listaliases")]
+    async fn list_aliases(&self) -> RpcResult<serde_json::Value>;
+
     #[method(name = "stop")]
     async fn stop(&self) -> RpcResult<String>;
 }
@@ -645,13 +658,30 @@ impl BitaiirRpcImpl {
             .iter()
             .enumerate()
             .map(|(i, out)| {
-                let addr =
-                    bitaiir_crypto::address::Address::from_recipient_hash(&out.recipient_hash);
-                serde_json::json!({
-                    "vout": i,
-                    "address": addr.as_str(),
-                    "amount": format!("{}", out.amount),
-                })
+                if let Some(params) = out.alias_params() {
+                    let target =
+                        bitaiir_crypto::address::Address::from_recipient_hash(&params.target_hash);
+                    let owner =
+                        bitaiir_crypto::address::Address::from_recipient_hash(&params.owner_hash);
+                    serde_json::json!({
+                        "vout": i,
+                        "type": "alias",
+                        "alias": String::from_utf8_lossy(&params.name),
+                        "target": target.as_str(),
+                        "owner": owner.as_str(),
+                        "expiry_height": params.expiry_height,
+                        "amount": format!("{}", out.amount),
+                    })
+                } else {
+                    let addr = bitaiir_crypto::address::Address::from_recipient_hash(
+                        &out.recipient_hash().unwrap_or([0; 20]),
+                    );
+                    serde_json::json!({
+                        "vout": i,
+                        "address": addr.as_str(),
+                        "amount": format!("{}", out.amount),
+                    })
+                }
             })
             .collect();
 
@@ -803,13 +833,27 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
         let amount_atoms = (amount * 100_000_000.0) as u64;
 
-        let to_recipient_hash = address_to_recipient_hash(&to_address).ok_or_else(|| {
-            jsonrpsee::types::ErrorObjectOwned::owned(
-                -3,
-                format!("invalid recipient address: {to_address}"),
-                None::<()>,
-            )
-        })?;
+        // Resolve @alias syntax: strip the '@' prefix and look up
+        // the alias name in the UTXO-derived index.
+        let to_recipient_hash = if let Some(alias_name) = to_address.strip_prefix('@') {
+            let alias_name = alias_name.to_lowercase();
+            let state = self.state.read().await;
+            state.utxo.resolve_alias(&alias_name).ok_or_else(|| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    -3,
+                    format!("alias '@{alias_name}' not found or expired"),
+                    None::<()>,
+                )
+            })?
+        } else {
+            address_to_recipient_hash(&to_address).ok_or_else(|| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    -3,
+                    format!("invalid recipient address: {to_address}"),
+                    None::<()>,
+                )
+            })?
+        };
 
         // --- Phase 1: snapshot + reserve under a WRITE lock ------------- //
         //
@@ -890,7 +934,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             let mut inputs_total: u64 = 0;
             let mut selected_utxos: Vec<(OutPoint, TxOut)> = Vec::new();
             for (outpoint, txout) in state.utxo.iter() {
-                if txout.recipient_hash != from_hash {
+                if txout.recipient_hash() != Some(from_hash) {
                     continue;
                 }
                 // Skip immature coinbases — they can't be spent yet.
@@ -907,7 +951,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                 if mempool_spent.contains(outpoint) {
                     continue;
                 }
-                selected_utxos.push((*outpoint, *txout));
+                selected_utxos.push((*outpoint, txout.clone()));
                 inputs_total = inputs_total.saturating_add(txout.amount.to_atomic());
                 if inputs_total >= amount_atoms {
                     break;
@@ -942,16 +986,13 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         // --- Phase 2: build + sign tx (NO lock) ------------------------- //
 
         // Build transaction outputs (recipient + change).
-        let mut outputs = vec![TxOut {
-            amount: Amount::from_atomic(amount_atoms),
-            recipient_hash: to_recipient_hash,
-        }];
+        let mut outputs = vec![TxOut::p2pkh(
+            Amount::from_atomic(amount_atoms),
+            to_recipient_hash,
+        )];
         let change = inputs_total - amount_atoms;
         if change > 0 {
-            outputs.push(TxOut {
-                amount: Amount::from_atomic(change),
-                recipient_hash: from_hash,
-            });
+            outputs.push(TxOut::p2pkh(Amount::from_atomic(change), from_hash));
         }
 
         let mut tx = Transaction {
@@ -1157,7 +1198,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                 // Check if we RECEIVED in this tx (outputs to our address).
                 let mut received: u64 = 0;
                 for out in &tx.outputs {
-                    if out.recipient_hash == target_hash {
+                    if out.recipient_hash() == Some(target_hash) {
                         received += out.amount.to_atomic();
                     }
                 }
@@ -1177,7 +1218,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                     if is_sender {
                         // Amount sent = outputs NOT going to our address.
                         for out in &tx.outputs {
-                            if out.recipient_hash != target_hash {
+                            if out.recipient_hash() != Some(target_hash) {
                                 sent += out.amount.to_atomic();
                             }
                         }
@@ -1245,7 +1286,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             let txid = tx.txid();
             let mut received: u64 = 0;
             for out in &tx.outputs {
-                if out.recipient_hash == target_hash {
+                if out.recipient_hash() == Some(target_hash) {
                     received += out.amount.to_atomic();
                 }
             }
@@ -1261,7 +1302,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             }
             if is_sender {
                 for out in &tx.outputs {
-                    if out.recipient_hash != target_hash {
+                    if out.recipient_hash() != Some(target_hash) {
                         sent += out.amount.to_atomic();
                     }
                 }
@@ -2085,6 +2126,285 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             "status": "wallet restored from mnemonic",
             "addresses": 1,
             "first_address": addr,
+        }))
+    }
+
+    async fn register_alias(&self, name: String, address: String) -> RpcResult<serde_json::Value> {
+        let name_lower = name.to_lowercase();
+        let name_bytes = name_lower.as_bytes().to_vec();
+
+        bitaiir_types::validate_alias_name(&name_bytes)
+            .map_err(|e| rpc_err(format!("invalid alias name: {e}")))?;
+
+        let target_hash = address_to_recipient_hash(&address)
+            .ok_or_else(|| rpc_err(format!("invalid target address: {address}")))?;
+
+        let fee_atoms = bitaiir_types::ALIAS_REGISTRATION_FEE.to_atomic();
+
+        let (privkey, pubkey_bytes, from_hash, selected_utxos, inputs_total, expiry_height) = {
+            let mut state = self.state.write().await;
+
+            if state.wallet_encrypted && !state.wallet_unlocked {
+                return Err(rpc_err("wallet is locked"));
+            }
+
+            if state.utxo.alias_exists(&name_lower) {
+                return Err(rpc_err(format!("alias '{name_lower}' already registered")));
+            }
+
+            let current_height = state.chain.height();
+            let expiry_height = current_height as u32 + bitaiir_types::ALIAS_PERIOD;
+            let maturity = bitaiir_chain::consensus::coinbase_maturity();
+
+            let mempool_spent: std::collections::HashSet<OutPoint> = state
+                .mempool
+                .iter()
+                .flat_map(|(_, tx)| tx.inputs.iter().map(|i| i.prev_out))
+                .collect();
+
+            let addresses = state.wallet.addresses();
+            let mut from_address: Option<String> = None;
+            let excluded: std::collections::HashSet<OutPoint> = state
+                .pending_spends
+                .iter()
+                .copied()
+                .chain(mempool_spent.iter().copied())
+                .collect();
+            for addr in &addresses {
+                let bal = Wallet::spendable_balance_excluding_pending(
+                    addr,
+                    &state.utxo,
+                    current_height,
+                    &excluded,
+                );
+                if bal >= fee_atoms {
+                    from_address = Some(addr.clone());
+                    break;
+                }
+            }
+            let from_address = from_address
+                .ok_or_else(|| rpc_err("insufficient spendable balance for alias fee"))?;
+
+            let (privkey, pubkey) = state
+                .wallet
+                .get_keys(&from_address)
+                .expect("address exists")
+                .clone();
+
+            let pubkey_bytes = pubkey.to_compressed();
+            let from_hash = hash160(&pubkey_bytes);
+
+            let mut inputs_total: u64 = 0;
+            let mut selected: Vec<(OutPoint, TxOut)> = Vec::new();
+            for (outpoint, txout) in state.utxo.iter() {
+                if txout.recipient_hash() != Some(from_hash) {
+                    continue;
+                }
+                if let Some(cb_height) = state.utxo.coinbase_height(outpoint) {
+                    if current_height < cb_height + maturity {
+                        continue;
+                    }
+                }
+                if state.pending_spends.contains(outpoint) || mempool_spent.contains(outpoint) {
+                    continue;
+                }
+                selected.push((*outpoint, txout.clone()));
+                inputs_total = inputs_total.saturating_add(txout.amount.to_atomic());
+                if inputs_total >= fee_atoms {
+                    break;
+                }
+            }
+
+            if inputs_total < fee_atoms {
+                return Err(rpc_err("insufficient spendable balance for alias fee"));
+            }
+
+            for (op, _) in &selected {
+                state.pending_spends.insert(*op);
+            }
+
+            (
+                privkey,
+                pubkey_bytes,
+                from_hash,
+                selected,
+                inputs_total,
+                expiry_height,
+            )
+        };
+
+        let alias_params = bitaiir_types::AliasParams {
+            name: name_bytes,
+            target_hash,
+            owner_hash: from_hash,
+            expiry_height,
+        };
+        let alias_output = TxOut::alias(bitaiir_types::ALIAS_REGISTRATION_FEE, &alias_params);
+
+        let mut outputs = vec![alias_output];
+        let change = inputs_total - fee_atoms;
+        if change > 0 {
+            outputs.push(TxOut::p2pkh(Amount::from_atomic(change), from_hash));
+        }
+
+        let mut tx = Transaction {
+            version: 1,
+            inputs: selected_utxos
+                .iter()
+                .map(|(op, _)| TxIn {
+                    prev_out: *op,
+                    signature: Vec::new(),
+                    pubkey: pubkey_bytes.to_vec(),
+                    sequence: u32::MAX,
+                })
+                .collect(),
+            outputs,
+            locktime: 0,
+            pow_nonce: 0,
+            pow_priority: 0,
+        };
+
+        let sighash = tx.sighash();
+        let sig = privkey.sign_digest(sighash.as_bytes());
+        for input in &mut tx.inputs {
+            input.signature = sig.clone();
+        }
+
+        let bg_state = self.state.clone();
+        let bg_events = self.events.clone();
+        let bg_reserved: Vec<OutPoint> = selected_utxos.iter().map(|(op, _)| *op).collect();
+        let bg_name = name_lower.clone();
+        let txid_preview = tx.txid();
+
+        tokio::spawn(async move {
+            let tx = match tokio::task::spawn_blocking(move || {
+                bitaiir_chain::mine_tx_pow_with_priority(&mut tx, 1);
+                tx
+            })
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    let mut s = bg_state.write().await;
+                    for op in &bg_reserved {
+                        s.pending_spends.remove(op);
+                    }
+                    if let Some(ev) = &bg_events {
+                        let _ = ev.send(format!("  registeralias: pow failed ({e})"));
+                    }
+                    return;
+                }
+            };
+
+            let txid = tx.txid();
+            let mut s = bg_state.write().await;
+
+            let height = s.chain.height();
+            if let Err(e) = validate_transaction(&tx, &s.utxo, height) {
+                for op in &bg_reserved {
+                    s.pending_spends.remove(op);
+                }
+                if let Some(ev) = &bg_events {
+                    let _ = ev.send(format!("  registeralias: tx {txid} dropped ({e})"));
+                }
+                return;
+            }
+
+            let tx_bytes =
+                bitaiir_types::encoding::to_bytes(&tx).expect("Transaction always encodes");
+            for peer in &s.peers {
+                let _ = peer
+                    .sender
+                    .try_send(bitaiir_net::NetMessage::TxData(tx_bytes.clone()));
+            }
+
+            if let Err(e) = s.mempool.add(tx) {
+                for op in &bg_reserved {
+                    s.pending_spends.remove(op);
+                }
+                if let Some(ev) = &bg_events {
+                    let _ = ev.send(format!("  registeralias: mempool rejected ({e})"));
+                }
+                return;
+            }
+
+            for op in &bg_reserved {
+                s.pending_spends.remove(op);
+            }
+
+            if let Some(ev) = &bg_events {
+                let completion = serde_json::json!({
+                    "event": "alias_registered",
+                    "alias": bg_name,
+                    "txid": txid.to_string(),
+                    "status": "broadcast and added to mempool",
+                });
+                if let Ok(pretty) = serde_json::to_string_pretty(&completion) {
+                    for line in pretty.lines() {
+                        let _ = ev.send(format!("  {line}"));
+                    }
+                }
+            }
+        });
+
+        Ok(serde_json::json!({
+            "txid": txid_preview.to_string(),
+            "alias": name_lower,
+            "target": address,
+            "status": "tx-PoW mining in background",
+        }))
+    }
+
+    async fn resolve_alias(&self, name: String) -> RpcResult<serde_json::Value> {
+        let name_lower = name.strip_prefix('@').unwrap_or(&name).to_lowercase();
+        let state = self.state.read().await;
+
+        let outpoint = state
+            .utxo
+            .alias_outpoint(&name_lower)
+            .ok_or_else(|| rpc_err(format!("alias '{name_lower}' not found")))?;
+
+        let txout = state
+            .utxo
+            .get(outpoint)
+            .ok_or_else(|| rpc_err("alias UTXO missing"))?;
+
+        let params = txout
+            .alias_params()
+            .ok_or_else(|| rpc_err("malformed alias output"))?;
+
+        let address = Address::from_recipient_hash(&params.target_hash);
+        let owner = Address::from_recipient_hash(&params.owner_hash);
+
+        Ok(serde_json::json!({
+            "alias": name_lower,
+            "address": address.to_string(),
+            "owner": owner.to_string(),
+            "expiry_height": params.expiry_height,
+            "locked_aiir": txout.amount.to_string(),
+        }))
+    }
+
+    async fn list_aliases(&self) -> RpcResult<serde_json::Value> {
+        let state = self.state.read().await;
+        let mut entries = Vec::new();
+
+        for (name, outpoint) in state.utxo.aliases() {
+            if let Some(txout) = state.utxo.get(outpoint) {
+                if let Some(params) = txout.alias_params() {
+                    let address = Address::from_recipient_hash(&params.target_hash);
+                    entries.push(serde_json::json!({
+                        "alias": name,
+                        "address": address.to_string(),
+                        "expiry_height": params.expiry_height,
+                    }));
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "count": entries.len(),
+            "aliases": entries,
         }))
     }
 

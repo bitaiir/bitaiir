@@ -320,6 +320,20 @@ enum Commands {
         /// The 24-word mnemonic phrase (quoted).
         phrase: String,
     },
+    /// Register an alias (on-chain name → address mapping).
+    Registeralias {
+        /// Alias name (1–32 chars, a-z0-9 and hyphens).
+        name: String,
+        /// Target BitAiir address the alias resolves to.
+        address: String,
+    },
+    /// Resolve an alias to its target address.
+    Resolvealias {
+        /// Alias name to look up.
+        name: String,
+    },
+    /// List all registered aliases.
+    Listaliases,
     /// Ask the daemon to shut down gracefully.
     Stop,
 }
@@ -366,8 +380,11 @@ async fn main() {
         Commands::Sendtoaddress {
             address, amount, ..
         } => {
-            if !is_valid_address(address) {
-                eprintln!("Error: '{}' is not a valid BitAiir address.", address);
+            if !address.starts_with('@') && !is_valid_address(address) {
+                eprintln!(
+                    "Error: '{}' is not a valid BitAiir address or alias.",
+                    address
+                );
                 std::process::exit(1);
             }
             if *amount <= 0.0 {
@@ -458,6 +475,13 @@ async fn main() {
                 .request("importmnemonic", rpc_params![phrase.clone()])
                 .await
         }
+        Commands::Registeralias { name, address } => {
+            client
+                .request("registeralias", rpc_params![name, address])
+                .await
+        }
+        Commands::Resolvealias { name } => client.request("resolvealias", rpc_params![name]).await,
+        Commands::Listaliases => client.request("listaliases", rpc_params![]).await,
         Commands::Stop => client.request("stop", rpc_params![]).await,
     };
 

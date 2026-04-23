@@ -47,10 +47,10 @@ pub(crate) fn sample_coinbase(height: u64) -> Transaction {
             pubkey: Vec::new(),
             sequence: u32::MAX,
         }],
-        outputs: vec![TxOut {
-            amount: Amount::from_atomic(100 * 100_000_000),
-            recipient_hash: test_recipient_hash(),
-        }],
+        outputs: vec![TxOut::p2pkh(
+            Amount::from_atomic(100 * 100_000_000),
+            test_recipient_hash(),
+        )],
         locktime: 0,
         pow_nonce: 0,
         pow_priority: 1,
@@ -76,10 +76,10 @@ pub(crate) fn sample_normal_tx(spend: OutPoint, _pow_nonce: u64) -> Transaction 
             pubkey: pubkey.to_compressed().to_vec(),
             sequence: u32::MAX,
         }],
-        outputs: vec![TxOut {
-            amount: Amount::from_atomic(50 * 100_000_000),
-            recipient_hash: test_recipient_hash(),
-        }],
+        outputs: vec![TxOut::p2pkh(
+            Amount::from_atomic(50 * 100_000_000),
+            test_recipient_hash(),
+        )],
         locktime: 0,
         pow_nonce: 0,
         pow_priority: 1,

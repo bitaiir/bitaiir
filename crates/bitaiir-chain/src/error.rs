@@ -132,9 +132,41 @@ pub enum Error {
     #[error("pubkey hash mismatch for outpoint {0}")]
     PubkeyMismatch(OutPoint),
 
+    /// A non-P2PKH output was spent as if it were P2PKH.
+    #[error("invalid output type for P2PKH spend on outpoint {0}")]
+    InvalidOutputType(OutPoint),
+
     /// The ECDSA signature in a TxIn is invalid.
     #[error("invalid signature for outpoint {0}")]
     InvalidInputSignature(OutPoint),
+
+    /// An output_type value is not recognized.
+    #[error("unknown output type {0}")]
+    UnknownOutputType(u8),
+
+    /// An alias output payload could not be parsed.
+    #[error("malformed alias payload")]
+    MalformedAliasPayload,
+
+    /// Alias name validation failed.
+    #[error("invalid alias name: {0}")]
+    InvalidAliasName(&'static str),
+
+    /// Alias registration fee too low.
+    #[error("alias registration fee below minimum")]
+    AliasFeeInsufficient,
+
+    /// Alias expiry_height is already in the past.
+    #[error("alias expiry {0} is in the past")]
+    AliasExpiryInPast(u32),
+
+    /// Alias expiry_height is too far in the future.
+    #[error("alias expiry {got} exceeds max {max}")]
+    AliasExpiryTooFar { max: u32, got: u32 },
+
+    /// An alias with this name already exists.
+    #[error("alias already registered: {0}")]
+    AliasAlreadyRegistered(String),
 
     /// The transaction's anti-spam pow_nonce does not meet the target.
     #[error("invalid transaction proof of work (anti-spam nonce)")]

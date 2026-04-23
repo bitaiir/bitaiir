@@ -90,14 +90,8 @@ fn sample_transaction() -> Transaction {
             sequence: u32::MAX,
         }],
         outputs: vec![
-            TxOut {
-                amount: Amount::from_atomic(21_000_000),
-                recipient_hash: [0x42; 20],
-            },
-            TxOut {
-                amount: Amount::from_atomic(79_000_000),
-                recipient_hash: [0x99; 20],
-            },
+            TxOut::p2pkh(Amount::from_atomic(21_000_000), [0x42; 20]),
+            TxOut::p2pkh(Amount::from_atomic(79_000_000), [0x99; 20]),
         ],
         locktime: 0,
         pow_nonce: 7,

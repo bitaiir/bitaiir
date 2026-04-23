@@ -1,16 +1,18 @@
 //! Transactions, inputs, and outputs.
 //!
 //! BitAiir follows a Bitcoin-style UTXO model: a transaction consumes some
-//! number of previously-unspent outputs and produces new outputs. What it
-//! deliberately does *not* have is a scripting language. Each output
-//! specifies a recipient by their 20-byte HASH160 (the same payload
-//! embedded in a BitAiir address), and each input proves authorization
-//! with a raw `(signature, pubkey)` pair. No opcodes, no interpreter.
+//! number of previously-unspent outputs and produces new outputs.
 //!
-//! This is the simplest model that supports normal payments. Future
-//! protocol versions could add a richer script layer without changing the
-//! on-chain data definitions here — the `signature` field is already a
-//! `Vec<u8>` so it can hold arbitrary unlocking data.
+//! Each output carries an `output_type` discriminator:
+//!
+//! - **Type 0 (P2PKH):** standard pay-to-pubkey-hash. The `payload` is
+//!   the 20-byte HASH160 of the recipient's public key, and spending
+//!   requires a `(signature, pubkey)` pair that matches.
+//! - **Type 1 (Escrow):** N-of-M multisig with timeout (protocol §21).
+//! - **Type 2 (Alias):** on-chain name registry entry (protocol §20).
+//!
+//! The `signature` field on `TxIn` is a `Vec<u8>` so it can hold
+//! concatenated multi-sig data for escrow spends.
 
 use bitaiir_crypto::hash::double_sha256;
 use serde::{Deserialize, Serialize};
@@ -64,15 +66,124 @@ pub struct TxIn {
     pub sequence: u32,
 }
 
+/// Output type discriminator — protocol §20.2.
+pub const OUTPUT_TYPE_P2PKH: u8 = 0;
+pub const OUTPUT_TYPE_ESCROW: u8 = 1;
+pub const OUTPUT_TYPE_ALIAS: u8 = 2;
+
 /// An output of a transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `output_type` selects the spending rules; `payload` carries the
+/// type-specific data (20-byte hash for P2PKH, `AliasParams` for
+/// alias, `EscrowParams` for escrow).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxOut {
     /// How much AIIR this output pays, in atomic units.
     pub amount: Amount,
-    /// The 20-byte HASH160 of the recipient's public key — the same
-    /// payload encoded inside a BitAiir address between the version byte
-    /// and the checksum.
-    pub recipient_hash: [u8; 20],
+    /// Discriminator: 0 = P2PKH, 1 = escrow, 2 = alias.
+    pub output_type: u8,
+    /// Type-specific payload.  For P2PKH this is the 20-byte HASH160
+    /// of the recipient's public key.
+    pub payload: Vec<u8>,
+}
+
+/// Alias registration fee: 1 AIIR (provisional, protocol §20.5).
+pub const ALIAS_REGISTRATION_FEE: Amount = Amount::from_atomic(100_000_000);
+
+/// Alias validity period in blocks: ~1 year at 5 s/block (provisional).
+pub const ALIAS_PERIOD: u32 = 6_300_000;
+
+/// Grace period after expiry where only the owner can still spend.
+pub const ALIAS_GRACE_PERIOD: u32 = 50_000;
+
+/// Validate an alias name per protocol §20.3.
+pub fn validate_alias_name(name: &[u8]) -> std::result::Result<(), &'static str> {
+    if name.is_empty() || name.len() > 32 {
+        return Err("alias name must be 1–32 bytes");
+    }
+    if !name[0].is_ascii_lowercase() {
+        return Err("alias name must start with a letter");
+    }
+    let last = name[name.len() - 1];
+    if !last.is_ascii_lowercase() && !last.is_ascii_digit() {
+        return Err("alias name must end with alphanumeric");
+    }
+    for window in name.windows(2) {
+        let a = window[0];
+        let b = window[1];
+        if (a == b'-' || a == b'_') && (b == b'-' || b == b'_') {
+            return Err("consecutive punctuation not allowed");
+        }
+    }
+    for &ch in name {
+        if !ch.is_ascii_lowercase() && !ch.is_ascii_digit() && ch != b'-' && ch != b'_' {
+            return Err("invalid character in alias name");
+        }
+    }
+    Ok(())
+}
+
+/// Parameters stored in the payload of an alias output (type 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AliasParams {
+    /// Alias name (1–32 bytes, validated per protocol §20.3).
+    pub name: Vec<u8>,
+    /// HASH160 of the address this alias resolves to.
+    pub target_hash: [u8; 20],
+    /// HASH160 of the key that can update / renew / deregister.
+    pub owner_hash: [u8; 20],
+    /// Block height at which this alias expires.
+    pub expiry_height: u32,
+}
+
+impl TxOut {
+    /// Create a standard P2PKH output.
+    pub fn p2pkh(amount: Amount, recipient_hash: [u8; 20]) -> Self {
+        Self {
+            amount,
+            output_type: OUTPUT_TYPE_P2PKH,
+            payload: recipient_hash.to_vec(),
+        }
+    }
+
+    /// Create an alias registration output.
+    pub fn alias(amount: Amount, params: &AliasParams) -> Self {
+        Self {
+            amount,
+            output_type: OUTPUT_TYPE_ALIAS,
+            payload: encoding::to_bytes(params).expect("AliasParams encodes"),
+        }
+    }
+
+    /// Extract the 20-byte recipient hash from a P2PKH output.
+    /// Returns `None` if this is not a P2PKH output or the payload
+    /// is malformed.
+    pub fn recipient_hash(&self) -> Option<[u8; 20]> {
+        if self.output_type == OUTPUT_TYPE_P2PKH && self.payload.len() == 20 {
+            let mut h = [0u8; 20];
+            h.copy_from_slice(&self.payload);
+            Some(h)
+        } else {
+            None
+        }
+    }
+
+    /// Parse alias parameters from an alias output.
+    pub fn alias_params(&self) -> Option<AliasParams> {
+        if self.output_type == OUTPUT_TYPE_ALIAS {
+            encoding::from_bytes(&self.payload).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn is_p2pkh(&self) -> bool {
+        self.output_type == OUTPUT_TYPE_P2PKH
+    }
+
+    pub fn is_alias(&self) -> bool {
+        self.output_type == OUTPUT_TYPE_ALIAS
+    }
 }
 
 /// A complete BitAiir transaction.
