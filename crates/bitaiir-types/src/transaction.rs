@@ -123,6 +123,22 @@ pub fn validate_alias_name(name: &[u8]) -> std::result::Result<(), &'static str>
     Ok(())
 }
 
+/// Maximum number of signers in an escrow (protocol §21.3).
+pub const MAX_ESCROW_N: usize = 15;
+
+/// Parameters stored in the payload of an escrow output (type 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EscrowParams {
+    /// Required number of signatures for release (1 ≤ m ≤ n).
+    pub m: u8,
+    /// HASH160 values of the N authorized signers.
+    pub pubkey_hashes: Vec<[u8; 20]>,
+    /// Block height after which the refund path is enabled.
+    pub timeout_height: u32,
+    /// HASH160 of the key that can claim a refund after timeout.
+    pub refund_hash: [u8; 20],
+}
+
 /// Parameters stored in the payload of an alias output (type 2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AliasParams {
@@ -143,6 +159,15 @@ impl TxOut {
             amount,
             output_type: OUTPUT_TYPE_P2PKH,
             payload: recipient_hash.to_vec(),
+        }
+    }
+
+    /// Create an escrow output.
+    pub fn escrow(amount: Amount, params: &EscrowParams) -> Self {
+        Self {
+            amount,
+            output_type: OUTPUT_TYPE_ESCROW,
+            payload: encoding::to_bytes(params).expect("EscrowParams encodes"),
         }
     }
 
@@ -183,6 +208,19 @@ impl TxOut {
 
     pub fn is_alias(&self) -> bool {
         self.output_type == OUTPUT_TYPE_ALIAS
+    }
+
+    pub fn is_escrow(&self) -> bool {
+        self.output_type == OUTPUT_TYPE_ESCROW
+    }
+
+    /// Parse escrow parameters from an escrow output.
+    pub fn escrow_params(&self) -> Option<EscrowParams> {
+        if self.output_type == OUTPUT_TYPE_ESCROW {
+            encoding::from_bytes(&self.payload).ok()
+        } else {
+            None
+        }
     }
 }
 

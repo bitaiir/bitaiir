@@ -17,7 +17,7 @@ use bitaiir_crypto::address::Address;
 use bitaiir_crypto::hash::hash160;
 use bitaiir_crypto::key::{PrivateKey, PublicKey};
 use bitaiir_storage::Storage;
-use bitaiir_types::{Amount, Hash256, OutPoint, Transaction, TxIn, TxOut};
+use bitaiir_types::{Amount, EscrowParams, Hash256, OutPoint, Transaction, TxIn, TxOut};
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::core::async_trait;
 use jsonrpsee::proc_macros::rpc;
@@ -577,6 +577,22 @@ pub trait BitaiirApi {
     #[method(name = "listaliases")]
     async fn list_aliases(&self) -> RpcResult<serde_json::Value>;
 
+    #[method(name = "createescrow")]
+    async fn create_escrow(
+        &self,
+        amount: f64,
+        m: u8,
+        addresses: Vec<String>,
+        timeout_blocks: u32,
+        refund_address: String,
+    ) -> RpcResult<serde_json::Value>;
+
+    #[method(name = "refundescrow")]
+    async fn refund_escrow(&self, txid: String, vout: u32) -> RpcResult<serde_json::Value>;
+
+    #[method(name = "listescrows")]
+    async fn list_escrows(&self) -> RpcResult<serde_json::Value>;
+
     #[method(name = "stop")]
     async fn stop(&self) -> RpcResult<String>;
 }
@@ -670,6 +686,26 @@ impl BitaiirRpcImpl {
                         "target": target.as_str(),
                         "owner": owner.as_str(),
                         "expiry_height": params.expiry_height,
+                        "amount": format!("{}", out.amount),
+                    })
+                } else if let Some(params) = out.escrow_params() {
+                    let signers: Vec<String> = params
+                        .pubkey_hashes
+                        .iter()
+                        .map(|h| {
+                            bitaiir_crypto::address::Address::from_recipient_hash(h).to_string()
+                        })
+                        .collect();
+                    let refund =
+                        bitaiir_crypto::address::Address::from_recipient_hash(&params.refund_hash);
+                    serde_json::json!({
+                        "vout": i,
+                        "type": "escrow",
+                        "m": params.m,
+                        "n": params.pubkey_hashes.len(),
+                        "signers": signers,
+                        "timeout_height": params.timeout_height,
+                        "refund": refund.as_str(),
                         "amount": format!("{}", out.amount),
                     })
                 } else {
@@ -2405,6 +2441,438 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         Ok(serde_json::json!({
             "count": entries.len(),
             "aliases": entries,
+        }))
+    }
+
+    async fn create_escrow(
+        &self,
+        amount: f64,
+        m: u8,
+        addresses: Vec<String>,
+        timeout_blocks: u32,
+        refund_address: String,
+    ) -> RpcResult<serde_json::Value> {
+        let amount_atoms = (amount * 100_000_000.0) as u64;
+        if amount_atoms == 0 {
+            return Err(rpc_err("amount must be positive"));
+        }
+
+        let n = addresses.len();
+        if n == 0 || n > bitaiir_types::MAX_ESCROW_N {
+            return Err(rpc_err(format!(
+                "need 1..{} signer addresses, got {n}",
+                bitaiir_types::MAX_ESCROW_N
+            )));
+        }
+        if m == 0 || m as usize > n {
+            return Err(rpc_err(format!("m must be 1..{n}, got {m}")));
+        }
+
+        let mut pubkey_hashes: Vec<[u8; 20]> = Vec::with_capacity(n);
+        for addr in &addresses {
+            let h = address_to_recipient_hash(addr)
+                .ok_or_else(|| rpc_err(format!("invalid signer address: {addr}")))?;
+            pubkey_hashes.push(h);
+        }
+        let refund_hash = address_to_recipient_hash(&refund_address)
+            .ok_or_else(|| rpc_err(format!("invalid refund address: {refund_address}")))?;
+
+        let (privkey, pubkey_bytes, from_hash, selected_utxos, inputs_total, timeout_height) = {
+            let mut state = self.state.write().await;
+
+            if state.wallet_encrypted && !state.wallet_unlocked {
+                return Err(rpc_err("wallet is locked"));
+            }
+
+            let current_height = state.chain.height();
+            let timeout_height = current_height as u32 + timeout_blocks;
+            let maturity = bitaiir_chain::consensus::coinbase_maturity();
+
+            let mempool_spent: std::collections::HashSet<OutPoint> = state
+                .mempool
+                .iter()
+                .flat_map(|(_, tx)| tx.inputs.iter().map(|i| i.prev_out))
+                .collect();
+
+            let addresses = state.wallet.addresses();
+            let excluded: std::collections::HashSet<OutPoint> = state
+                .pending_spends
+                .iter()
+                .copied()
+                .chain(mempool_spent.iter().copied())
+                .collect();
+            let mut from_address: Option<String> = None;
+            for addr in &addresses {
+                let bal = Wallet::spendable_balance_excluding_pending(
+                    addr,
+                    &state.utxo,
+                    current_height,
+                    &excluded,
+                );
+                if bal >= amount_atoms {
+                    from_address = Some(addr.clone());
+                    break;
+                }
+            }
+            let from_address =
+                from_address.ok_or_else(|| rpc_err("insufficient spendable balance for escrow"))?;
+
+            let (privkey, pubkey) = state
+                .wallet
+                .get_keys(&from_address)
+                .expect("address exists")
+                .clone();
+
+            let pubkey_bytes = pubkey.to_compressed();
+            let from_hash = hash160(&pubkey_bytes);
+
+            let mut inputs_total: u64 = 0;
+            let mut selected: Vec<(OutPoint, TxOut)> = Vec::new();
+            for (outpoint, txout) in state.utxo.iter() {
+                if txout.recipient_hash() != Some(from_hash) {
+                    continue;
+                }
+                if let Some(cb_height) = state.utxo.coinbase_height(outpoint) {
+                    if current_height < cb_height + maturity {
+                        continue;
+                    }
+                }
+                if state.pending_spends.contains(outpoint) || mempool_spent.contains(outpoint) {
+                    continue;
+                }
+                selected.push((*outpoint, txout.clone()));
+                inputs_total = inputs_total.saturating_add(txout.amount.to_atomic());
+                if inputs_total >= amount_atoms {
+                    break;
+                }
+            }
+
+            if inputs_total < amount_atoms {
+                return Err(rpc_err("insufficient spendable balance for escrow"));
+            }
+
+            for (op, _) in &selected {
+                state.pending_spends.insert(*op);
+            }
+
+            (
+                privkey,
+                pubkey_bytes,
+                from_hash,
+                selected,
+                inputs_total,
+                timeout_height,
+            )
+        };
+
+        let params = EscrowParams {
+            m,
+            pubkey_hashes,
+            timeout_height,
+            refund_hash,
+        };
+        let escrow_output = TxOut::escrow(Amount::from_atomic(amount_atoms), &params);
+
+        let mut outputs = vec![escrow_output];
+        let change = inputs_total - amount_atoms;
+        if change > 0 {
+            outputs.push(TxOut::p2pkh(Amount::from_atomic(change), from_hash));
+        }
+
+        let mut tx = Transaction {
+            version: 1,
+            inputs: selected_utxos
+                .iter()
+                .map(|(op, _)| TxIn {
+                    prev_out: *op,
+                    signature: Vec::new(),
+                    pubkey: pubkey_bytes.to_vec(),
+                    sequence: u32::MAX,
+                })
+                .collect(),
+            outputs,
+            locktime: 0,
+            pow_nonce: 0,
+            pow_priority: 0,
+        };
+
+        let sighash = tx.sighash();
+        let sig = privkey.sign_digest(sighash.as_bytes());
+        for input in &mut tx.inputs {
+            input.signature = sig.clone();
+        }
+
+        let bg_state = self.state.clone();
+        let bg_events = self.events.clone();
+        let bg_reserved: Vec<OutPoint> = selected_utxos.iter().map(|(op, _)| *op).collect();
+        let txid_preview = tx.txid();
+
+        tokio::spawn(async move {
+            let tx = match tokio::task::spawn_blocking(move || {
+                bitaiir_chain::mine_tx_pow_with_priority(&mut tx, 1);
+                tx
+            })
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    let mut s = bg_state.write().await;
+                    for op in &bg_reserved {
+                        s.pending_spends.remove(op);
+                    }
+                    if let Some(ev) = &bg_events {
+                        let _ = ev.send(format!("  createescrow: pow failed ({e})"));
+                    }
+                    return;
+                }
+            };
+
+            let txid = tx.txid();
+            let mut s = bg_state.write().await;
+
+            let height = s.chain.height();
+            if let Err(e) = validate_transaction(&tx, &s.utxo, height) {
+                for op in &bg_reserved {
+                    s.pending_spends.remove(op);
+                }
+                if let Some(ev) = &bg_events {
+                    let _ = ev.send(format!("  createescrow: tx {txid} dropped ({e})"));
+                }
+                return;
+            }
+
+            let tx_bytes =
+                bitaiir_types::encoding::to_bytes(&tx).expect("Transaction always encodes");
+            for peer in &s.peers {
+                let _ = peer
+                    .sender
+                    .try_send(bitaiir_net::NetMessage::TxData(tx_bytes.clone()));
+            }
+
+            if let Err(e) = s.mempool.add(tx) {
+                for op in &bg_reserved {
+                    s.pending_spends.remove(op);
+                }
+                if let Some(ev) = &bg_events {
+                    let _ = ev.send(format!("  createescrow: mempool rejected ({e})"));
+                }
+                return;
+            }
+
+            for op in &bg_reserved {
+                s.pending_spends.remove(op);
+            }
+
+            if let Some(ev) = &bg_events {
+                let completion = serde_json::json!({
+                    "event": "escrow_created",
+                    "txid": txid.to_string(),
+                    "status": "broadcast and added to mempool",
+                });
+                if let Ok(pretty) = serde_json::to_string_pretty(&completion) {
+                    for line in pretty.lines() {
+                        let _ = ev.send(format!("  {line}"));
+                    }
+                }
+            }
+        });
+
+        Ok(serde_json::json!({
+            "txid": txid_preview.to_string(),
+            "m": m,
+            "n": n,
+            "timeout_height": timeout_height,
+            "amount": amount,
+            "status": "tx-PoW mining in background",
+        }))
+    }
+
+    async fn refund_escrow(&self, txid: String, vout: u32) -> RpcResult<serde_json::Value> {
+        let txid_hash: Hash256 = txid
+            .parse()
+            .map_err(|_| rpc_err(format!("invalid txid: {txid}")))?;
+
+        let outpoint = OutPoint {
+            txid: txid_hash,
+            vout,
+        };
+
+        let (privkey, pubkey_bytes, refund_hash, escrow_amount, selected_op) = {
+            let mut state = self.state.write().await;
+
+            if state.wallet_encrypted && !state.wallet_unlocked {
+                return Err(rpc_err("wallet is locked"));
+            }
+
+            let txout = state
+                .utxo
+                .get(&outpoint)
+                .ok_or_else(|| rpc_err("UTXO not found"))?
+                .clone();
+
+            if !txout.is_escrow() {
+                return Err(rpc_err("output is not an escrow"));
+            }
+
+            let params = txout
+                .escrow_params()
+                .ok_or_else(|| rpc_err("malformed escrow payload"))?;
+
+            let current_height = state.chain.height();
+            if (current_height as u32) <= params.timeout_height {
+                return Err(rpc_err(format!(
+                    "escrow not yet expired (current {current_height}, timeout {})",
+                    params.timeout_height
+                )));
+            }
+
+            let refund_addr = Address::from_recipient_hash(&params.refund_hash).to_string();
+            let (privkey, pubkey) = state
+                .wallet
+                .get_keys(&refund_addr)
+                .ok_or_else(|| rpc_err("wallet does not hold the refund key"))?
+                .clone();
+
+            if state.pending_spends.contains(&outpoint) {
+                return Err(rpc_err("escrow UTXO already reserved by another tx"));
+            }
+            state.pending_spends.insert(outpoint);
+
+            let pubkey_bytes = pubkey.to_compressed();
+            (
+                privkey,
+                pubkey_bytes,
+                params.refund_hash,
+                txout.amount.to_atomic(),
+                outpoint,
+            )
+        };
+
+        let mut tx = Transaction {
+            version: 1,
+            inputs: vec![TxIn {
+                prev_out: selected_op,
+                signature: Vec::new(),
+                pubkey: pubkey_bytes.to_vec(),
+                sequence: u32::MAX,
+            }],
+            outputs: vec![TxOut::p2pkh(
+                Amount::from_atomic(escrow_amount),
+                refund_hash,
+            )],
+            locktime: 0,
+            pow_nonce: 0,
+            pow_priority: 0,
+        };
+
+        let sighash = tx.sighash();
+        let sig = privkey.sign_digest(sighash.as_bytes());
+        tx.inputs[0].signature = sig;
+
+        let bg_state = self.state.clone();
+        let bg_events = self.events.clone();
+        let bg_reserved = selected_op;
+        let txid_preview = tx.txid();
+
+        tokio::spawn(async move {
+            let tx = match tokio::task::spawn_blocking(move || {
+                bitaiir_chain::mine_tx_pow_with_priority(&mut tx, 1);
+                tx
+            })
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    let mut s = bg_state.write().await;
+                    s.pending_spends.remove(&bg_reserved);
+                    if let Some(ev) = &bg_events {
+                        let _ = ev.send(format!("  refundescrow: pow failed ({e})"));
+                    }
+                    return;
+                }
+            };
+
+            let txid = tx.txid();
+            let mut s = bg_state.write().await;
+
+            let height = s.chain.height();
+            if let Err(e) = validate_transaction(&tx, &s.utxo, height) {
+                s.pending_spends.remove(&bg_reserved);
+                if let Some(ev) = &bg_events {
+                    let _ = ev.send(format!("  refundescrow: tx {txid} dropped ({e})"));
+                }
+                return;
+            }
+
+            let tx_bytes =
+                bitaiir_types::encoding::to_bytes(&tx).expect("Transaction always encodes");
+            for peer in &s.peers {
+                let _ = peer
+                    .sender
+                    .try_send(bitaiir_net::NetMessage::TxData(tx_bytes.clone()));
+            }
+
+            if let Err(e) = s.mempool.add(tx) {
+                s.pending_spends.remove(&bg_reserved);
+                if let Some(ev) = &bg_events {
+                    let _ = ev.send(format!("  refundescrow: mempool rejected ({e})"));
+                }
+                return;
+            }
+
+            s.pending_spends.remove(&bg_reserved);
+
+            if let Some(ev) = &bg_events {
+                let completion = serde_json::json!({
+                    "event": "escrow_refunded",
+                    "txid": txid.to_string(),
+                    "status": "broadcast and added to mempool",
+                });
+                if let Ok(pretty) = serde_json::to_string_pretty(&completion) {
+                    for line in pretty.lines() {
+                        let _ = ev.send(format!("  {line}"));
+                    }
+                }
+            }
+        });
+
+        Ok(serde_json::json!({
+            "txid": txid_preview.to_string(),
+            "status": "tx-PoW mining in background",
+        }))
+    }
+
+    async fn list_escrows(&self) -> RpcResult<serde_json::Value> {
+        let state = self.state.read().await;
+        let mut entries = Vec::new();
+
+        for (outpoint, txout) in state.utxo.iter() {
+            if !txout.is_escrow() {
+                continue;
+            }
+            if let Some(params) = txout.escrow_params() {
+                let signers: Vec<String> = params
+                    .pubkey_hashes
+                    .iter()
+                    .map(|h| Address::from_recipient_hash(h).to_string())
+                    .collect();
+                let refund_addr = Address::from_recipient_hash(&params.refund_hash);
+                entries.push(serde_json::json!({
+                    "txid": outpoint.txid.to_string(),
+                    "vout": outpoint.vout,
+                    "amount": txout.amount.to_string(),
+                    "m": params.m,
+                    "n": params.pubkey_hashes.len(),
+                    "signers": signers,
+                    "timeout_height": params.timeout_height,
+                    "refund_address": refund_addr.to_string(),
+                }));
+            }
+        }
+
+        Ok(serde_json::json!({
+            "count": entries.len(),
+            "escrows": entries,
         }))
     }
 

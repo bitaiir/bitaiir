@@ -76,4 +76,6 @@ pub use tx_pow::{
     tx_pow_hash, validate_tx_pow,
 };
 pub use utxo::{BlockUndo, SpentInput, UtxoSet};
-pub use validation::{validate_block, validate_block_standalone, validate_transaction};
+pub use validation::{
+    median_time_past, validate_block, validate_block_standalone, validate_transaction,
+};

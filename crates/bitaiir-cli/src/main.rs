@@ -334,6 +334,28 @@ enum Commands {
     },
     /// List all registered aliases.
     Listaliases,
+    /// Lock AIIR in an M-of-N escrow.
+    Createescrow {
+        /// Amount in AIIR to lock.
+        amount: f64,
+        /// Required signatures for release (m of n).
+        m: u8,
+        /// Signer addresses (n addresses).
+        addresses: Vec<String>,
+        /// Blocks until refund is enabled.
+        timeout_blocks: u32,
+        /// Address that can claim a refund after timeout.
+        refund_address: String,
+    },
+    /// Refund an expired escrow output.
+    Refundescrow {
+        /// Transaction ID containing the escrow output.
+        txid: String,
+        /// Output index within the transaction.
+        vout: u32,
+    },
+    /// List all active escrows in the UTXO set.
+    Listescrows,
     /// Ask the daemon to shut down gracefully.
     Stop,
 }
@@ -482,6 +504,26 @@ async fn main() {
         }
         Commands::Resolvealias { name } => client.request("resolvealias", rpc_params![name]).await,
         Commands::Listaliases => client.request("listaliases", rpc_params![]).await,
+        Commands::Createescrow {
+            amount,
+            m,
+            addresses,
+            timeout_blocks,
+            refund_address,
+        } => {
+            client
+                .request(
+                    "createescrow",
+                    rpc_params![amount, m, addresses, timeout_blocks, refund_address],
+                )
+                .await
+        }
+        Commands::Refundescrow { txid, vout } => {
+            client
+                .request("refundescrow", rpc_params![txid, vout])
+                .await
+        }
+        Commands::Listescrows => client.request("listescrows", rpc_params![]).await,
         Commands::Stop => client.request("stop", rpc_params![]).await,
     };
 
