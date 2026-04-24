@@ -802,6 +802,11 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         if let Err(e) = self.storage.save_wallet_key(&address, &privkey, &pubkey) {
             tracing::warn!("failed to persist wallet key: {e}");
         }
+        // Persist the updated HD index so the next restart derives
+        // all addresses, not just the first one.
+        let _ = self
+            .storage
+            .set_metadata("hd_index", &state.wallet.next_hd_index().to_be_bytes());
         Ok(address)
     }
 
@@ -2361,7 +2366,6 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let bg_events = self.events.clone();
         let bg_reserved: Vec<OutPoint> = selected_utxos.iter().map(|(op, _)| *op).collect();
         let bg_name = name_lower.clone();
-        let txid_preview = tx.txid();
 
         tokio::spawn(async move {
             let tx = match tokio::task::spawn_blocking(move || {
@@ -2435,7 +2439,6 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         });
 
         Ok(serde_json::json!({
-            "txid": txid_preview.to_string(),
             "alias": name_lower,
             "target": address,
             "status": "tx-PoW mining in background",
@@ -2474,15 +2477,25 @@ impl BitaiirApiServer for BitaiirRpcImpl {
 
     async fn list_aliases(&self) -> RpcResult<serde_json::Value> {
         let state = self.state.read().await;
-        let mut entries = Vec::new();
+        let wallet_addrs = state.wallet.addresses();
+        let wallet_hashes: std::collections::HashSet<[u8; 20]> = wallet_addrs
+            .iter()
+            .filter_map(|a| address_to_recipient_hash(a))
+            .collect();
 
+        let mut entries = Vec::new();
         for (name, outpoint) in state.utxo.aliases() {
             if let Some(txout) = state.utxo.get(outpoint) {
                 if let Some(params) = txout.alias_params() {
+                    if !wallet_hashes.contains(&params.owner_hash) {
+                        continue;
+                    }
                     let address = Address::from_recipient_hash(&params.target_hash);
+                    let owner = Address::from_recipient_hash(&params.owner_hash);
                     entries.push(serde_json::json!({
                         "alias": name,
                         "address": address.to_string(),
+                        "owner": owner.to_string(),
                         "expiry_height": params.expiry_height,
                     }));
                 }
@@ -2656,7 +2669,6 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let bg_state = self.state.clone();
         let bg_events = self.events.clone();
         let bg_reserved: Vec<OutPoint> = selected_utxos.iter().map(|(op, _)| *op).collect();
-        let txid_preview = tx.txid();
 
         tokio::spawn(async move {
             let tx = match tokio::task::spawn_blocking(move || {
@@ -2729,7 +2741,6 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         });
 
         Ok(serde_json::json!({
-            "txid": txid_preview.to_string(),
             "m": m,
             "n": n,
             "timeout_height": timeout_height,
@@ -2823,7 +2834,6 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         let bg_state = self.state.clone();
         let bg_events = self.events.clone();
         let bg_reserved = selected_op;
-        let txid_preview = tx.txid();
 
         tokio::spawn(async move {
             let tx = match tokio::task::spawn_blocking(move || {
@@ -2888,8 +2898,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         });
 
         Ok(serde_json::json!({
-            "txid": txid_preview.to_string(),
-            "status": "tx-PoW mining in background",
+            "status": "refund tx-PoW mining in background",
         }))
     }
 
