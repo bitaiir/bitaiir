@@ -63,7 +63,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("getnewaddress", "Generate a new address"),
     ("getbalance", "Show address balance"),
     ("listaddresses", "List all wallet addresses"),
-    ("sendtoaddress", "Send AIIR to address or @alias"),
+    ("sendtoaddress", "Send AIIR to addr/@alias [--from]"),
     ("getmempoolinfo", "Show mempool status"),
     ("gettransaction", "Look up tx by txid"),
     ("gettransactionhistory", "Tx history for address"),
@@ -1492,7 +1492,7 @@ fn handle_command(
             "  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"
         )),
         "sendtoaddress" if parts.len() < 3 => Some(format!(
-            "  {DIM}Usage: /sendtoaddress <addr|@alias> <amount> [priority]{RESET}"
+            "  {DIM}Usage: /sendtoaddress <addr|@alias> <amount> [priority] [from_addr]{RESET}"
         )),
         "sendtoaddress" if !parts[1].starts_with('@') && !is_valid_address(parts[1]) => Some(
             format!("  {RED}Error: invalid BitAiir address (bad checksum or format).{RESET}"),
@@ -1569,13 +1569,15 @@ fn handle_command(
             "listaddresses" => client.request("listaddresses", rpc_params![]).await,
             "sendtoaddress" => {
                 let amt: f64 = parts[2].parse().unwrap();
-                // Optional 4th arg = priority multiplier (u64).
+                // Optional 3rd arg = priority multiplier (u64).
                 // Defaults to 1 (minimum target, cheapest accepted).
                 let priority: Option<u64> = parts.get(3).and_then(|s| s.parse().ok());
+                // Optional 4th arg = source address (pay from).
+                let from_addr: Option<String> = parts.get(4).cloned();
                 client
                     .request(
                         "sendtoaddress",
-                        rpc_params![parts[1].clone(), amt, priority],
+                        rpc_params![parts[1].clone(), amt, priority, from_addr],
                     )
                     .await
             }
@@ -1633,11 +1635,16 @@ fn handle_command(
             }
             "registeralias" => {
                 if parts.len() < 3 {
-                    Ok(serde_json::json!("Usage: /registeralias <name> <address>"))
+                    Ok(serde_json::json!(
+                        "Usage: /registeralias <name> <address> [from_addr]"
+                    ))
                 } else {
                     let n = parts[1].clone();
                     let a = parts[2].clone();
-                    client.request("registeralias", rpc_params![n, a]).await
+                    let from_addr: Option<String> = parts.get(3).cloned();
+                    client
+                        .request("registeralias", rpc_params![n, a, from_addr])
+                        .await
                 }
             }
             "resolvealias" => {

@@ -253,6 +253,10 @@ enum Commands {
         /// useful when the network is congested.
         #[arg(long, default_value_t = 1)]
         priority: u64,
+        /// Wallet address to pay from.  When omitted the daemon
+        /// auto-selects the first address with enough balance.
+        #[arg(long)]
+        from: Option<String>,
     },
     /// Show transaction history for an address.
     Gettransactionhistory {
@@ -326,6 +330,10 @@ enum Commands {
         name: String,
         /// Target BitAiir address the alias resolves to.
         address: String,
+        /// Wallet address to pay the alias fee from.  When omitted
+        /// the daemon auto-selects.
+        #[arg(long)]
+        from: Option<String>,
     },
     /// Resolve an alias to its target address.
     Resolvealias {
@@ -400,7 +408,10 @@ async fn main() {
             std::process::exit(1);
         }
         Commands::Sendtoaddress {
-            address, amount, ..
+            address,
+            amount,
+            from,
+            ..
         } => {
             if !address.starts_with('@') && !is_valid_address(address) {
                 eprintln!(
@@ -412,6 +423,12 @@ async fn main() {
             if *amount <= 0.0 {
                 eprintln!("Error: amount must be greater than 0.");
                 std::process::exit(1);
+            }
+            if let Some(f) = from {
+                if !is_valid_address(f) {
+                    eprintln!("Error: --from '{}' is not a valid BitAiir address.", f);
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Addpeer { addr } if !addr.contains(':') => {
@@ -434,11 +451,12 @@ async fn main() {
             address,
             amount,
             priority,
+            from,
         } => {
             client
                 .request(
                     "sendtoaddress",
-                    rpc_params![address.clone(), *amount, Some(*priority)],
+                    rpc_params![address.clone(), *amount, Some(*priority), from],
                 )
                 .await
         }
@@ -497,9 +515,13 @@ async fn main() {
                 .request("importmnemonic", rpc_params![phrase.clone()])
                 .await
         }
-        Commands::Registeralias { name, address } => {
+        Commands::Registeralias {
+            name,
+            address,
+            from,
+        } => {
             client
-                .request("registeralias", rpc_params![name, address])
+                .request("registeralias", rpc_params![name, address, from])
                 .await
         }
         Commands::Resolvealias { name } => client.request("resolvealias", rpc_params![name]).await,
