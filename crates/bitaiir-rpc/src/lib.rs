@@ -497,6 +497,7 @@ pub trait BitaiirApi {
         to_address: String,
         amount: f64,
         priority: Option<u64>,
+        from_address: Option<String>,
     ) -> RpcResult<serde_json::Value>;
 
     /// List all transactions involving an address (sent and received),
@@ -569,7 +570,12 @@ pub trait BitaiirApi {
     async fn import_mnemonic(&self, phrase: String) -> RpcResult<serde_json::Value>;
 
     #[method(name = "registeralias")]
-    async fn register_alias(&self, name: String, address: String) -> RpcResult<serde_json::Value>;
+    async fn register_alias(
+        &self,
+        name: String,
+        address: String,
+        from_address: Option<String>,
+    ) -> RpcResult<serde_json::Value>;
 
     #[method(name = "resolvealias")]
     async fn resolve_alias(&self, name: String) -> RpcResult<serde_json::Value>;
@@ -821,6 +827,7 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         to_address: String,
         amount: f64,
         priority: Option<u64>,
+        explicit_from: Option<String>,
     ) -> RpcResult<serde_json::Value> {
         // Resolve priority up-front.  `1` is the default — same CPU
         // cost as a stock send.  Higher values mine against a
@@ -935,27 +942,48 @@ impl BitaiirApiServer for BitaiirRpcImpl {
             let pending = state.pending_spends.clone();
             let mut excluded = pending.clone();
             excluded.extend(mempool_spent.iter().copied());
-            let mut from_address: Option<String> = None;
-            for addr in &addresses {
+
+            let from_address = if let Some(explicit) = explicit_from {
+                // Caller chose a specific source address — validate it.
+                if !addresses.contains(&explicit) {
+                    return Err(rpc_err(format!("address {explicit} is not in this wallet")));
+                }
                 let bal = Wallet::spendable_balance_excluding_pending(
-                    addr,
+                    &explicit,
                     &state.utxo,
                     tip_height,
                     &excluded,
                 );
-                if bal >= amount_atoms {
-                    from_address = Some(addr.clone());
-                    break;
+                if bal < amount_atoms {
+                    return Err(rpc_err(format!(
+                        "address {explicit} has insufficient balance"
+                    )));
                 }
-            }
-            let from_address = from_address.ok_or_else(|| {
-                jsonrpsee::types::ErrorObjectOwned::owned(
-                    -2,
-                    "insufficient spendable balance (immature coinbases, \
-                     in-flight sends, and mempool-spent outputs don't count)",
-                    None::<()>,
-                )
-            })?;
+                explicit
+            } else {
+                // Auto-select: first address with enough balance.
+                let mut found: Option<String> = None;
+                for addr in &addresses {
+                    let bal = Wallet::spendable_balance_excluding_pending(
+                        addr,
+                        &state.utxo,
+                        tip_height,
+                        &excluded,
+                    );
+                    if bal >= amount_atoms {
+                        found = Some(addr.clone());
+                        break;
+                    }
+                }
+                found.ok_or_else(|| {
+                    jsonrpsee::types::ErrorObjectOwned::owned(
+                        -2,
+                        "insufficient spendable balance (immature coinbases, \
+                         in-flight sends, and mempool-spent outputs don't count)",
+                        None::<()>,
+                    )
+                })?
+            };
 
             let (privkey, pubkey) = state
                 .wallet
@@ -2165,7 +2193,12 @@ impl BitaiirApiServer for BitaiirRpcImpl {
         }))
     }
 
-    async fn register_alias(&self, name: String, address: String) -> RpcResult<serde_json::Value> {
+    async fn register_alias(
+        &self,
+        name: String,
+        address: String,
+        explicit_from: Option<String>,
+    ) -> RpcResult<serde_json::Value> {
         let name_lower = name.to_lowercase();
         let name_bytes = name_lower.as_bytes().to_vec();
 
@@ -2199,27 +2232,45 @@ impl BitaiirApiServer for BitaiirRpcImpl {
                 .collect();
 
             let addresses = state.wallet.addresses();
-            let mut from_address: Option<String> = None;
             let excluded: std::collections::HashSet<OutPoint> = state
                 .pending_spends
                 .iter()
                 .copied()
                 .chain(mempool_spent.iter().copied())
                 .collect();
-            for addr in &addresses {
+
+            let from_address = if let Some(explicit) = explicit_from {
+                if !addresses.contains(&explicit) {
+                    return Err(rpc_err(format!("address {explicit} is not in this wallet")));
+                }
                 let bal = Wallet::spendable_balance_excluding_pending(
-                    addr,
+                    &explicit,
                     &state.utxo,
                     current_height,
                     &excluded,
                 );
-                if bal >= fee_atoms {
-                    from_address = Some(addr.clone());
-                    break;
+                if bal < fee_atoms {
+                    return Err(rpc_err(format!(
+                        "address {explicit} has insufficient balance for alias fee"
+                    )));
                 }
-            }
-            let from_address = from_address
-                .ok_or_else(|| rpc_err("insufficient spendable balance for alias fee"))?;
+                explicit
+            } else {
+                let mut found: Option<String> = None;
+                for addr in &addresses {
+                    let bal = Wallet::spendable_balance_excluding_pending(
+                        addr,
+                        &state.utxo,
+                        current_height,
+                        &excluded,
+                    );
+                    if bal >= fee_atoms {
+                        found = Some(addr.clone());
+                        break;
+                    }
+                }
+                found.ok_or_else(|| rpc_err("insufficient spendable balance for alias fee"))?
+            };
 
             let (privkey, pubkey) = state
                 .wallet
