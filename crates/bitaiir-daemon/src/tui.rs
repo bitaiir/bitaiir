@@ -1536,8 +1536,14 @@ fn handle_command(
     // TUI froze.  The actual result appears when the async task finishes.
     match name.as_str() {
         "sendtoaddress" => {
+            let pri: u64 = parts
+                .get(3)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1)
+                .max(1);
+            let secs = pri;
             let _ = log_tx.send(format!(
-                "  {DIM}Sending transaction (anti-spam PoW ~2s)...{RESET}"
+                "  {DIM}Sending transaction (anti-spam PoW ~{secs}s)...{RESET}"
             ));
         }
         "addpeer" => {

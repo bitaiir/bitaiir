@@ -121,7 +121,7 @@ a BitAiir artifact cannot be confused with a Bitcoin artifact.
 | Argon2id time cost             | 1 iteration                                  | provisional  |
 | Argon2id parallelism           | 1 lane                                       | provisional  |
 | Argon2id output length         | 32 bytes                                     | provisional  |
-| Tx-level anti-spam PoW target  | ~2 s CPU time on commodity laptop            | provisional  |
+| Tx-level anti-spam PoW target  | 20 leading zero bits (~1 s on commodity laptop) | calibrated   |
 | Minimum tx priority            | 1                                            | provisional  |
 | Max serialized block size      | 1_000_000 bytes                              | provisional  |
 | Max serialized transaction size| 100_000 bytes                                | provisional  |
@@ -497,11 +497,11 @@ at send time, before broadcasting the transaction.
 
 **Minimum target.** The tx-level PoW has a fixed minimum target
 `MIN_TX_TARGET` that a commodity laptop CPU can meet in approximately
-**2 seconds** with priority `1`. The exact numerical minimum target is
-part of the protocol and is calibrated before mainnet. A provisional
-value is
-`0x0000_000f_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff`,
-meaning the first four bytes of the digest must be zero.
+**1 second** with priority `1`. The numerical minimum target is
+`2^236` (20 leading zero bits), i.e.
+`0x0000_1000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000`.
+A hash is accepted iff, interpreted as a big-endian 256-bit integer,
+it is **strictly less than** this target.
 
 **Declared priority.** Each transaction carries a `pow_priority: u64`
 field declaring how much harder-than-minimum the sender committed to
@@ -511,8 +511,8 @@ mining. The effective target is:
 effective_target(tx) = MIN_TX_TARGET / max(tx.pow_priority, 1)
 ```
 
-Priority `1` is the minimum and corresponds to baseline ~2 s of CPU
-work. Priority `N` requires roughly `N`× the CPU work (~2 N seconds).
+Priority `1` is the minimum and corresponds to baseline ~1 s of CPU
+work. Priority `N` requires roughly `N`× the CPU work (~N seconds).
 Priority `0` is treated as `1` by the target formula and is rejected
 at validation time.
 
@@ -532,7 +532,7 @@ fn compute_tx_pow(tx: &mut Transaction, priority: u64) {
 
     for nonce in 0u64.. {
         let attempt = double_sha256(&[&tx_digest[..], &nonce.to_le_bytes()].concat());
-        if attempt_as_u256(attempt) <= target {
+        if attempt_as_u256(attempt) < target {
             tx.pow_nonce = nonce;
             return;
         }
@@ -555,9 +555,9 @@ CPU for faster confirmation. See section 13 for the full mempool
 policy.
 
 **Security property.** A spammer who wants to submit `N` transactions
-per second at priority `1` must spend `2 × N` CPU-seconds of work per
-second. A single-core attacker is capped at ~0.5 tx/s. Breaking 1000
-tx/s requires 2000 cores running continuously, which is economically
+per second at priority `1` must spend `N` CPU-seconds of work per
+second. A single-core attacker is capped at ~1 tx/s. Breaking 1000
+tx/s requires 1000 cores running continuously, which is economically
 unattractive for spam purposes. Declaring high priority costs the
 attacker proportionally more work, so priority cannot be used as a
 spam amplifier.
