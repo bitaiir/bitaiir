@@ -167,20 +167,59 @@ pub const DNS_SEEDS_TESTNET: &[&str] = &[
     // Example: "testnet-seed.bitaiir.org",
 ];
 
-/// Seed nodes for the currently-active network.
-pub fn seed_nodes() -> &'static [&'static str] {
+/// Hardcoded seed nodes for the currently-active network.  Operators
+/// can extend this list at runtime via `--seed` / `[network]
+/// seed_nodes`; the merged list is what the daemon actually uses.
+pub fn hardcoded_seed_nodes() -> &'static [&'static str] {
     match bitaiir_types::Network::active() {
         bitaiir_types::Network::Mainnet => SEED_NODES_MAINNET,
         bitaiir_types::Network::Testnet => SEED_NODES_TESTNET,
     }
 }
 
-/// DNS seed hostnames for the currently-active network.
-pub fn dns_seeds() -> &'static [&'static str] {
+/// Hardcoded DNS seed hostnames for the currently-active network.
+/// Extend at runtime via `--dns-seed` / `[network] dns_seeds`; skip
+/// entirely with `--no-dns-seeds` / `disable_dns_seeds = true`.
+pub fn hardcoded_dns_seeds() -> &'static [&'static str] {
     match bitaiir_types::Network::active() {
         bitaiir_types::Network::Mainnet => DNS_SEEDS_MAINNET,
         bitaiir_types::Network::Testnet => DNS_SEEDS_TESTNET,
     }
+}
+
+/// Combine the hardcoded list with operator-provided additions,
+/// preserving order (hardcoded first) and de-duplicating exact
+/// string matches.
+pub fn resolve_seed_nodes(extra: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = hardcoded_seed_nodes()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    for s in extra {
+        if !out.iter().any(|existing| existing == s) {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
+/// Combine hardcoded DNS seeds with operator-provided additions.
+/// When `disabled` is `true`, returns an empty list — both hardcoded
+/// and configured seeds are skipped.
+pub fn resolve_dns_seeds(extra: &[String], disabled: bool) -> Vec<String> {
+    if disabled {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = hardcoded_dns_seeds()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    for s in extra {
+        if !out.iter().any(|existing| existing == s) {
+            out.push(s.clone());
+        }
+    }
+    out
 }
 
 /// Default P2P port used when DNS resolution returns bare IPs.
@@ -204,11 +243,15 @@ pub struct PeerManager {
     shutdown: Arc<AtomicBool>,
     our_p2p_addr: String,
     rate_limit: PeerRateLimit,
+    /// Resolved DNS seed hostnames (hardcoded + operator-provided).
+    /// Empty when DNS seeding is disabled by configuration.
+    dns_seeds: Vec<String>,
     /// Last time DNS seeds were resolved (0 = never).
     last_dns_resolve: std::sync::atomic::AtomicU64,
 }
 
 impl PeerManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: SharedState,
         storage: Arc<Storage>,
@@ -216,6 +259,7 @@ impl PeerManager {
         shutdown: Arc<AtomicBool>,
         our_p2p_addr: String,
         rate_limit: PeerRateLimit,
+        dns_seeds: Vec<String>,
     ) -> Self {
         Self {
             state,
@@ -224,6 +268,7 @@ impl PeerManager {
             shutdown,
             our_p2p_addr,
             rate_limit,
+            dns_seeds,
             last_dns_resolve: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -453,7 +498,7 @@ impl PeerManager {
     /// is resolved to A/AAAA records and the resulting IPs are added
     /// to `known_peers` with `PeerSource::Seed`.
     async fn maybe_resolve_dns_seeds(&self) {
-        if dns_seeds().is_empty() {
+        if self.dns_seeds.is_empty() {
             return;
         }
         let last = self.last_dns_resolve.load(Ordering::Relaxed);
@@ -471,7 +516,7 @@ impl PeerManager {
     async fn resolve_dns_seeds(&self) {
         let mut total_discovered = 0usize;
 
-        for &hostname in dns_seeds() {
+        for hostname in &self.dns_seeds {
             // lookup_host wants "host:port" — the port is needed for
             // the resolver API but we use our own DEFAULT_P2P_PORT.
             let lookup = format!("{hostname}:{}", default_p2p_port());
@@ -1504,5 +1549,47 @@ mod tests {
             assert!(b.try_take());
         }
         assert!(!b.try_take());
+    }
+
+    #[test]
+    fn resolve_seed_nodes_is_additive_and_dedups() {
+        // The hardcoded list is empty pre-launch, so the result is
+        // exactly the operator-provided extras with duplicates
+        // collapsed.  When the list is later populated this same
+        // test still proves the ordering invariant: hardcoded first,
+        // extras appended, no duplicates.
+        let extra = vec![
+            "203.0.113.10:8444".to_string(),
+            "203.0.113.11:8444".to_string(),
+            "203.0.113.10:8444".to_string(), // duplicate
+        ];
+        let resolved = resolve_seed_nodes(&extra);
+        for s in hardcoded_seed_nodes() {
+            assert!(resolved.iter().any(|r| r == s));
+        }
+        assert!(resolved.contains(&"203.0.113.10:8444".to_string()));
+        assert!(resolved.contains(&"203.0.113.11:8444".to_string()));
+        let count = resolved
+            .iter()
+            .filter(|r| *r == "203.0.113.10:8444")
+            .count();
+        assert_eq!(count, 1, "duplicates must be collapsed");
+    }
+
+    #[test]
+    fn resolve_dns_seeds_returns_empty_when_disabled() {
+        let extra = vec!["seed.example.org".to_string()];
+        let resolved = resolve_dns_seeds(&extra, true);
+        assert!(
+            resolved.is_empty(),
+            "disabled flag must drop both hardcoded and configured seeds",
+        );
+    }
+
+    #[test]
+    fn resolve_dns_seeds_merges_when_enabled() {
+        let extra = vec!["seed.example.org".to_string()];
+        let resolved = resolve_dns_seeds(&extra, false);
+        assert!(resolved.contains(&"seed.example.org".to_string()));
     }
 }

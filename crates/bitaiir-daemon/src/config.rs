@@ -50,6 +50,20 @@ pub struct NetworkConfig {
     /// persisted to the `known_peers` table if the peer has an
     /// outbound history; in-memory only for inbound-only peers.
     pub rate_limit_ban_secs: Option<u64>,
+    /// Extra static seed nodes to bootstrap from, on top of the
+    /// hardcoded list.  Each entry is `"ip:port"`.  Useful for
+    /// private or experimental networks where the binary's
+    /// compiled-in seeds aren't relevant.  Merged additively — never
+    /// replaces the hardcoded list.
+    pub seed_nodes: Option<Vec<String>>,
+    /// Extra DNS seed hostnames, on top of the hardcoded list.  Each
+    /// hostname's A/AAAA records should resolve to healthy peers.
+    /// Merged additively.
+    pub dns_seeds: Option<Vec<String>>,
+    /// Skip DNS seed resolution entirely (both hardcoded and
+    /// configured).  Useful for air-gapped / locked-down deployments
+    /// that only want to talk to explicit `--connect` peers.
+    pub disable_dns_seeds: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -186,6 +200,15 @@ pub fn write_default_config(path: &Path) {
 # rate_limit_msgs_per_sec = 100
 # rate_limit_burst        = 200
 # rate_limit_ban_secs     = 600
+
+# Extra bootstrap seeds, merged on top of the hardcoded list compiled
+# into the binary.  Use these on private / experimental networks, or
+# to add internal seeds that you don't want to upstream.  See
+# `docs/seed-operator-guide.md` for the full operator playbook.
+# seed_nodes = ["198.51.100.10:8444", "198.51.100.11:8444"]
+# dns_seeds  = ["seed.example.org"]
+# disable_dns_seeds = false  # true skips DNS resolution entirely
+                            # (both hardcoded and configured)
 
 [mining]
 # enabled = false

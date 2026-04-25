@@ -38,6 +38,18 @@
 # rate_limit_burst        = 200
 # rate_limit_ban_secs     = 600
 
+# Bootstrap seeds, merged additively with the binary's hardcoded
+# list (which is empty until v0.1.0).  Use these on private or
+# experimental networks, or to add internal seeds you don't want
+# to upstream.  CLI flags `--seed` / `--dns-seed` override these
+# values; `--no-dns-seeds` overrides `disable_dns_seeds`.  See
+# `docs/seed-operator-guide.md` for the full operator playbook.
+#
+# seed_nodes = ["198.51.100.10:8444", "198.51.100.11:8444"]
+# dns_seeds  = ["seed.example.org"]
+# disable_dns_seeds = false   # true = skip DNS resolution entirely
+                              # (both hardcoded and configured)
+
 [mining]
 # Start mining automatically on daemon startup (same as --mine).
 # enabled = false

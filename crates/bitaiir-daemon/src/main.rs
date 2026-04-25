@@ -67,6 +67,20 @@ struct Args {
     /// Connect to a peer on startup (repeatable).
     #[arg(long = "connect", value_name = "HOST:PORT")]
     connect: Vec<String>,
+    /// Extra static seed node, merged with the hardcoded list
+    /// (repeatable).  Useful for private networks or until the
+    /// official seeds are populated.  See
+    /// `docs/seed-operator-guide.md`.
+    #[arg(long = "seed", value_name = "HOST:PORT")]
+    seed: Vec<String>,
+    /// Extra DNS seed hostname, merged with the hardcoded list
+    /// (repeatable).
+    #[arg(long = "dns-seed", value_name = "HOSTNAME")]
+    dns_seed: Vec<String>,
+    /// Skip DNS seed resolution entirely (both hardcoded and
+    /// configured).  Use for air-gapped / locked-down deployments.
+    #[arg(long = "no-dns-seeds")]
+    no_dns_seeds: bool,
     /// Number of parallel mining threads. [default: min(4, cores/2)]
     #[arg(long)]
     mining_threads: Option<usize>,
@@ -83,6 +97,13 @@ struct Settings {
     mining_threads: usize,
     max_mempool_bytes: usize,
     rate_limit: peer_manager::PeerRateLimit,
+    /// Hardcoded seed nodes plus any operator-provided additions
+    /// (de-duplicated, hardcoded first).  Always populated;
+    /// "disabled" only applies to DNS seeds.
+    seed_nodes: Vec<String>,
+    /// DNS seed hostnames the daemon will resolve every hour.
+    /// Empty when `--no-dns-seeds` / `disable_dns_seeds = true`.
+    dns_seeds: Vec<String>,
 }
 
 impl Settings {
@@ -141,6 +162,24 @@ impl Settings {
             ban_secs: cfg.network.rate_limit_ban_secs.unwrap_or(defaults.ban_secs),
         };
 
+        // Seed lists: CLI flags + config additions are merged on top
+        // of the hardcoded arrays.  CLI takes priority over config
+        // when both are set; empty CLI falls back to config.
+        let seed_extra: Vec<String> = if !args.seed.is_empty() {
+            args.seed.clone()
+        } else {
+            cfg.network.seed_nodes.clone().unwrap_or_default()
+        };
+        let seed_nodes = peer_manager::resolve_seed_nodes(&seed_extra);
+
+        let dns_extra: Vec<String> = if !args.dns_seed.is_empty() {
+            args.dns_seed.clone()
+        } else {
+            cfg.network.dns_seeds.clone().unwrap_or_default()
+        };
+        let disable_dns = args.no_dns_seeds || cfg.network.disable_dns_seeds.unwrap_or(false);
+        let dns_seeds = peer_manager::resolve_dns_seeds(&dns_extra, disable_dns);
+
         Self {
             rpc_addr,
             p2p_addr,
@@ -151,6 +190,8 @@ impl Settings {
             mining_threads,
             max_mempool_bytes,
             rate_limit,
+            seed_nodes,
+            dns_seeds,
         }
     }
 }
@@ -493,12 +534,13 @@ async fn main() {
                 source: bitaiir_rpc::PeerSource::Manual,
             });
     }
-    // Seed nodes (fallback).
-    for &addr in peer_manager::seed_nodes() {
+    // Seed nodes (fallback).  `args.seed_nodes` already contains the
+    // hardcoded list merged with any --seed / config additions.
+    for addr in &args.seed_nodes {
         known_peers
-            .entry(addr.to_string())
+            .entry(addr.clone())
             .or_insert_with(|| bitaiir_rpc::KnownPeer {
-                addr: addr.to_string(),
+                addr: addr.clone(),
                 last_seen: 0,
                 consecutive_failures: 0,
                 banned_until: 0,
@@ -912,6 +954,7 @@ async fn main() {
         shutdown.clone(),
         args.p2p_addr.clone(),
         args.rate_limit,
+        args.dns_seeds.clone(),
     );
     let _pm_handle = pm.spawn();
 
