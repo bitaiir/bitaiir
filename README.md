@@ -6,7 +6,7 @@ BitAiir Core
 
 <div align="center">
 <h3>
-A decentralized payment cryptocurrency — fast, zero-fee, and mineable by anyone.
+Decentralized P2P payments with native escrow for commerce — fast, zero-fee, and mineable by anyone.
 </h3>
 
 ![Stars](https://img.shields.io/github/stars/bitaiir/bitaiir?style=social)
@@ -14,23 +14,46 @@ A decentralized payment cryptocurrency — fast, zero-fee, and mineable by anyon
 ![contributors](https://img.shields.io/github/contributors-anon/bitaiir/bitaiir)
 ![Forks](https://img.shields.io/github/forks/bitaiir/bitaiir?style=social)
 ![size](https://img.shields.io/github/languages/code-size/bitaiir/bitaiir)
+
 </div>
+
+> ⚠️ **Pre-mainnet.** Mainnet is not live yet — the public testnet is the only way to run a real node today. Use `--testnet` everywhere.
 
 ---
 
 ## What is BitAiir?
 
-BitAiir is a cryptocurrency designed for **everyday payments** — inspired by Brazil's Pix instant-payment system and built on Bitcoin's proven UTXO architecture. It combines fast 5-second block times, zero transaction fees, and a novel proof-of-work algorithm called **Proof of Aiir** that keeps mining accessible to anyone with a regular computer.
+BitAiir is a cryptocurrency built from scratch in Rust for **everyday payments and direct buy/sell**. The design borrows Bitcoin's UTXO architecture and Pix's "instant, no intermediaries" UX, then layers two consensus-level primitives on top: **on-chain aliases** (`@name → address`) and **N-of-M escrow with timeout refund**. The result is a small protocol surface that handles tipping, paying a merchant, milestone work, and group buys without smart contracts and without trusting a custodian.
 
-### Key Features
+Mining is **Proof of Aiir**: SHA-256d wrapped in 64 MiB of Argon2id, so an ASIC has no advantage over your laptop. Transactions carry a tiny per-tx proof of work (~1 s of CPU) instead of fees, which keeps the chain spam-resistant without ever charging users.
 
-- **Proof of Aiir** — SHA-256d wrapped in Argon2id (64 MiB memory-hard). Resists ASICs and GPUs so commodity CPUs stay competitive.
-- **5-second block time** — payments confirm in seconds, not minutes.
-- **Zero fees** — transactions are free. Anti-spam is enforced via a per-transaction proof of work (~2 seconds of sender CPU time) instead of fees.
-- **Tail emission** — block rewards halve like Bitcoin but never reach zero. A permanent floor of 10 AIIR/block ensures miners are always paid.
-- **Interactive TUI** — a terminal interface with slash-commands, autocomplete, scrollable logs, and real-time mining output.
-- **P2P networking** — nodes connect, sync chains, and propagate transactions and blocks automatically.
-- **Persistent storage** — chain data survives restarts via an embedded database (redb).
+---
+
+## Highlights
+
+### Network
+- **Proof of Aiir** — SHA-256d + Argon2id (64 MiB, memory-hard). Anti-ASIC, anti-GPU.
+- **5-second blocks** — 20-block retarget converges quickly.
+- **Zero fees, ever** — anti-spam is per-tx PoW (~1 s on a commodity laptop). Senders can declare a higher `pow_priority` to mine faster than the next user.
+- **Tail emission** — block reward halves every 50 M blocks but never falls below 10 AIIR; miners are paid forever.
+- **Compact-block relay (BIP 152-style)** + Bitcoin-style block locator for one-shot ancestor sync.
+- **Atomic reorg** — full UTXO undo, both in memory (snapshot/restore) and on disk (single redb transaction).
+
+### Wallet
+- **HD wallet** — BIP32 / BIP39 (24-word mnemonic) / BIP44, single-seed multi-address.
+- **AES-256-GCM + Argon2id** wallet encryption with `walletpassphrase` / `walletlock`.
+- **WIF import/export**, full backup/restore to JSON.
+- **`@alias` resolution** in `sendtoaddress` — pay a human-friendly name instead of a 34-char string.
+
+### Commerce primitives (consensus-level)
+- **Aliases** — on-chain name registry. Lock 1 AIIR to claim `@yourname`, ~1-year validity, owner-renew, anyone-can-spend after expiry.
+- **Escrow N-of-M** — single output type covers 2-of-3 arbitrated purchase, milestone payouts, and group buys. M-of-N signatures before timeout, single-sig refund after. Up to 15 signers.
+
+### Operator experience
+- **Interactive TUI** with slash-commands, autocomplete, mouse selection, and a live mining log.
+- **JSON-RPC over HTTPS** — auto-generated self-signed cert by default; bring your own cert if you prefer.
+- **Cookie auth + IP allow-list** — zero-config local use, optional `[rpc]` user/password and `allow_ip` for LAN.
+- **Headless build** — drop the TUI for smaller server / container / RISC-V binaries.
 
 ---
 
@@ -38,13 +61,10 @@ BitAiir is a cryptocurrency designed for **everyday payments** — inspired by B
 
 ### Docker
 
-Pre-built images are published to GitHub Container Registry on every release:
+Pre-built images are published to GitHub Container Registry on every release.
 
 ```bash
-# Testnet node, persistent data in a named volume.  The explicit
-# `0.0.0.0` binds are needed so `-p` port forwarding from the host
-# actually reaches the daemon — the default `127.0.0.1` only binds
-# inside the container's loopback namespace.
+# Testnet node, persistent data in a named volume.
 docker run -d --name bitaiir \
     -v bitaiir_testnet:/data \
     -p 18443:18443 -p 18444:18444 \
@@ -53,11 +73,11 @@ docker run -d --name bitaiir \
     --rpc-addr 0.0.0.0:18443 \
     --p2p-addr 0.0.0.0:18444
 
-# Query the node through the bundled CLI inside the container.
+# Query through the bundled CLI inside the container.
 docker exec bitaiir bitaiir-cli --testnet getblockchaininfo
 ```
 
-For mainnet drop the `--testnet` flag and swap the ports to `8443`/`8444`.  `:latest` tracks the newest stable release; pin to `:v0.1.0` (or any tag) for reproducibility.
+`:latest` tracks the newest stable release; pin to `:v0.1.0` (or any tag) for reproducibility.
 
 ### Build from source
 
@@ -69,142 +89,166 @@ cd bitaiir
 cargo build --release --bin bitaiird --bin bitaiir-cli
 ```
 
-**Headless build** (no TUI, no clipboard, no X11 runtime dep — smaller binary for server / container / RISC-V deployments):
+**Headless build** (no TUI, no clipboard, no X11 runtime dep — smaller binary for server / container / RISC-V):
 
 ```bash
 cargo build --release -p bitaiir-daemon --no-default-features
 ```
 
-Drops ~1 MB off the binary and the dependency on `libxcb` at runtime.  The `-i` / `--interactive` flag is rejected at startup in this build — use `bitaiir-cli` to talk to the RPC instead.
+The `-i` / `--interactive` flag is rejected at startup in this build — talk to the node via `bitaiir-cli`.
 
-### Run (Interactive Mode)
+### Run on testnet (interactive)
 
 ```bash
-./target/release/bitaiird -i
+./target/release/bitaiird --testnet -i --mine
 ```
 
-This opens the TUI where you can type commands directly:
+Opens the TUI with mining enabled. Type `/` to see commands.
 
 ```
 ╭ BitAiir Core v0.1.0 ──────────────────────────────────────────╮
+│  Network:    testnet                                           │
+│  Proof of Aiir (SHA-256d + Argon2id)                           │
+│  Target block time: 5s | Retarget every 20 blocks              │
 │                                                                │
-│  Type / to see commands. Example: /mine-start                  │
+│  Mining started (4 threads).                                   │
+│  Height | Hash            |     Reward |  Nonce |  Time | UTXOs│
+│  --------------------------------------------------------------│
+│       1 | e24f08...3b72   | 100 AIIR   |     69 |  3.2s |    2 │
+│       2 | f5c283...fe86   | 100 AIIR   |    254 | 11.1s |    3 │
 │                                                                │
-│  > /mine-start                                                 │
-│  "Mining started."                                             │
-│                                                                │
-│  Mining started.                                               │
-│  Height | Hash            | Reward      | Nonce | Time | UTXOs │
-│  ----------------------------------------------------------------│
-│       1 | 8c25dd...e409   | 100 AIIR    |  327  | 2.1s |    2 │
-│       2 | 95ced1...4e70   | 100 AIIR    |   84  | 0.8s |    3 │
-│                                                                │
-│  > /getnewaddress                                              │
-│  "aiir1KXgUaSrv31thw41QTrb3MpK9FBziQQZ8T"                     │
-│                                                                │
-│  > /sendtoaddress aiir1KXg... 10                               │
-│  { "txid": "5cbe93...", "status": "added to mempool" }         │
-│                                                                │
+│  > /sendtoaddress @alice 5                                     │
+│  Sending transaction (anti-spam PoW ~1s)...                    │
+│  { "txid": "5cbe93...", "status": "broadcast and added" }      │
 ╰────────────────────────────────────────────────────────────────╯
-╭────────────────────────────────────────────────────────────────╮
-│ bitaiir> /_                                                    │
-╰────────────────────────────────────────────────────────────────���
 ```
 
-### Run (Daemon Mode)
+### Run as a daemon
 
 ```bash
-# Start the daemon (no mining by default, like bitcoind)
-./target/release/bitaiird
+# Daemon (no mining by default, like bitcoind)
+./target/release/bitaiird --testnet
 
-# Start with mining enabled
-./target/release/bitaiird --mine
+# Mining enabled
+./target/release/bitaiird --testnet --mine
 
-# In another terminal, use the CLI
-./target/release/bitaiir-cli getblockchaininfo
-./target/release/bitaiir-cli mine-start
-./target/release/bitaiir-cli getnewaddress
-./target/release/bitaiir-cli sendtoaddress aiir1... 10.0
-./target/release/bitaiir-cli stop
+# In another terminal, talk to it via the CLI
+./target/release/bitaiir-cli --testnet getblockchaininfo
+./target/release/bitaiir-cli --testnet getnewaddress
+./target/release/bitaiir-cli --testnet sendtoaddress aiir1... 10.0
+./target/release/bitaiir-cli --testnet stop
 ```
 
 ---
 
 ## Commands
 
-All commands work in both the TUI (with `/` prefix) and the CLI.
+All commands work in both the TUI (with `/` prefix) and `bitaiir-cli`.
 
+### Chain & blocks
 | Command | Description |
 |---|---|
-| `getblockchaininfo` | Chain height, tip hash, UTXO count, next subsidy |
-| `getblock <height>` | Block details (hash, nonce, timestamp, transactions) |
-| `getnewaddress` | Generate a new BitAiir address |
-| `getbalance <address>` | Show the balance of an address |
-| `listaddresses` | List all wallet addresses with balances |
-| `sendtoaddress <addr> <amt>` | Send AIIR to an address |
-| `getmempoolinfo` | Number of pending transactions |
-| `mine-start` | Start mining |
-| `mine-stop` | Stop mining |
+| `getblockchaininfo` | Chain height, tip hash, UTXO count, mempool size |
+| `getblock <height>` | Block details (header, transactions) |
+| `getmempoolinfo` | Pending transactions (count, size, priority histogram) |
+| `gettransaction <txid>` | Look up a transaction by id |
+| `gettransactionhistory <addr>` | All txs touching an address |
+
+### Wallet
+| Command | Description |
+|---|---|
+| `getnewaddress` | Generate a new HD-derived address |
+| `getbalance <address>` | Spendable / immature / pending balance |
+| `listaddresses` | All wallet addresses with balances |
+| `sendtoaddress <addr\|@alias> <amt> [pri] [from]` | Send AIIR; optional priority and source address |
+| `getmnemonic` | Show the 24-word HD seed phrase |
+| `importmnemonic <words>` | Restore a wallet from a seed phrase |
+| `encryptwallet <passphrase>` | Encrypt the wallet at rest |
+| `walletpassphrase <pw> <secs>` | Unlock the wallet for N seconds |
+| `walletlock` | Lock the wallet immediately |
+| `exportwallet <file>` | Export keys to a JSON backup |
+| `importwallet <file>` | Restore from a JSON backup |
+| `importprivkey <wif>` | Add a single key to the wallet |
+
+### Aliases
+| Command | Description |
+|---|---|
+| `registeralias <@name> [from]` | Lock 1 AIIR to claim a name (~1-year validity) |
+| `resolvealias <@name>` | Look up the address backing a name |
+| `listaliases [filter]` | All aliases owned by the wallet |
+
+### Escrow
+| Command | Description |
+|---|---|
+| `createescrow <m> <signers> <amt> <timeout> <refund>` | Lock AIIR in an M-of-N escrow |
+| `refundescrow <txid>` | Refund an expired escrow back to the sender |
+| `listescrows` | Active escrows owned by the wallet |
+
+### Mining & networking
+| Command | Description |
+|---|---|
+| `mine-start` / `mine-stop` | Start or stop the mining loop |
 | `addpeer <ip:port>` | Connect to another BitAiir node |
-| `stop` | Shut down the daemon |
+| `listpeers` | Currently connected peers |
+| `listknownpeers` | All peers ever discovered (for reconnect) |
+| `stop` | Shut down the daemon cleanly |
 
 ---
 
-## P2P Networking
+## P2P networking
 
 Two nodes on the same machine:
 
 ```bash
-# Terminal 1: Node A
-./target/release/bitaiird --mine
+# Terminal 1: Node A (mining)
+./target/release/bitaiird --testnet --mine
 
-# Terminal 2: Node B (different ports and data dir)
-./target/release/bitaiird --rpc-addr 127.0.0.1:8442 --p2p-addr 127.0.0.1:8445 --data-dir bitaiir_data_b --no-mine
+# Terminal 2: Node B (different ports + data dir)
+./target/release/bitaiird --testnet \
+    --rpc-addr 127.0.0.1:18445 \
+    --p2p-addr 127.0.0.1:18446 \
+    --data-dir bitaiir_testnet_data_b \
+    --no-mine
 
-# Terminal 3: Connect B to A (syncs blocks automatically)
-./target/release/bitaiir-cli --rpc-url http://127.0.0.1:8442 addpeer 127.0.0.1:8444
+# Terminal 3: Connect B → A
+./target/release/bitaiir-cli --testnet \
+    --rpc-url https://127.0.0.1:18445 \
+    addpeer 127.0.0.1:18444
 ```
 
-Node B downloads all missing blocks from Node A, validates each one, and persists to disk. Transactions broadcast automatically between connected peers.
+Node B downloads missing blocks via header-first sync + compact-block relay, validates each one, and persists to disk. Transactions broadcast automatically between connected peers.
 
 ### Seed nodes and DNS seeds
 
-A fresh node (no saved `known_peers`, no `--connect`) bootstraps by consulting two compiled-in fallbacks, in order:
+A fresh node (no saved `known_peers`, no `--connect`) bootstraps from two compiled-in fallbacks, in order:
 
 1. **DNS seeds** — hostnames whose A/AAAA records resolve to healthy peers. Re-resolved every hour.
 2. **Hardcoded seed nodes** — a short list of long-lived static-IP nodes embedded in the binary.
 
-Both lists are network-specific (mainnet/testnet) and live in `crates/bitaiir-daemon/src/peer_manager.rs` (`SEED_NODES_MAINNET`, `DNS_SEEDS_MAINNET`, and the testnet counterparts). They are currently empty — the network is in development and has no public infrastructure yet.
-
-**Running a DNS seeder:** the reference implementation is [`bitcoin-seeder`](https://github.com/sipa/bitcoin-seeder). The pattern is the same for BitAiir:
-
-1. Run a crawler that connects to known BitAiir nodes, follows `getaddr`/`addr` gossip to discover more, and ranks them by uptime and recency.
-2. Expose an authoritative DNS server for a hostname (e.g. `seed.bitaiir.org`) that returns rotating A/AAAA records drawn from the top-ranked peers.
-3. Register the hostname in the appropriate `DNS_SEEDS_*` array and ship a new release.
-
-Static seed nodes are simpler: operate a BitAiir node on a static IP, commit its `"ip:port"` string to the appropriate `SEED_NODES_*` array, and release.
+Both lists are network-specific (mainnet/testnet) and live in `crates/bitaiir-daemon/src/peer_manager.rs`. They are currently empty — public infrastructure is registered ahead of v0.1.0.
 
 ---
 
-## Protocol Summary
+## Protocol summary
 
 | Parameter | Value |
 |---|---|
 | Block time | 5 seconds |
+| Difficulty retarget | Every 20 blocks |
+| Initial difficulty `bits` | `0x2001fffe` (calibrated for ~5 s on a commodity laptop) |
 | Proof of work | Proof of Aiir (SHA-256d + Argon2id 64 MiB) |
 | Initial reward | 100 AIIR |
-| Halving interval | 50,000,000 blocks (~7.9 years) |
+| Halving interval | 50 000 000 blocks (~7.9 years) |
 | Tail emission | 10 AIIR/block forever |
-| Transaction fees | Optional (zero by default) |
-| Anti-spam | Per-transaction PoW (~2s CPU) |
-| Difficulty retarget | Every 20 blocks (~100 seconds) |
+| Transaction fees | None (zero by protocol) |
+| Anti-spam | Per-tx PoW, 20 leading zero bits (~1 s CPU at priority 1) |
 | Address format | `aiir` prefix + Base58Check |
 | WIF version byte | `0xfe` |
-| Network magic | `0xB1 0x7A 0x11 0xED` |
-| P2P port | 8444 |
-| RPC port | 8443 |
+| Network magic | `0xB1 0x7A 0x11 0xED` (mainnet) / distinct on testnet |
+| Default ports | 8443 RPC / 8444 P2P (mainnet) — 18443 / 18444 (testnet) |
+| Coinbase maturity | 100 blocks (mainnet) / 10 blocks (testnet) |
 
-Full protocol specification: [`docs/protocol.md`](docs/protocol.md)
+Full specification: [`docs/protocol.md`](docs/protocol.md).
 
 ---
 
@@ -212,33 +256,24 @@ Full protocol specification: [`docs/protocol.md`](docs/protocol.md)
 
 ```
 crates/
-├── bitaiir-crypto     Hashing, ECDSA, Base58, WIF, addresses, signed messages
-├── bitaiir-types      Block, Transaction, Hash256, Amount, merkle root, encoding
-├── bitaiir-chain      Consensus rules, validation, UTXO set, mempool, mining, PoW
-├── bitaiir-storage    Persistent storage (redb)
-├── bitaiir-net        P2P wire protocol, handshake, block sync, tx gossip
-├── bitaiir-rpc        JSON-RPC server (jsonrpsee)
-├── bitaiir-node       Integration library (future)
-├── bitaiir-daemon     bitaiird binary (daemon + TUI)
-└── bitaiir-cli        bitaiir-cli binary (command-line client)
+├── bitaiir-crypto     Hashing, secp256k1 ECDSA, Base58/WIF, addresses, AES+Argon2 wallet, BIP32/39/44
+├── bitaiir-types      Block, Transaction (incl. pow_priority), TxOut variants (P2PKH/escrow/alias), encoding
+├── bitaiir-chain      Consensus rules, validation, UTXO + undo, mempool, mining, tx-PoW, fork choice
+├── bitaiir-storage    Persistent storage (redb): blocks, UTXOs, undo, peers, atomic apply_reorg
+├── bitaiir-net        P2P wire protocol, framing, compact blocks, block locator
+├── bitaiir-rpc        JSON-RPC server (jsonrpsee) + wallet, alias / escrow / mining RPCs
+├── bitaiir-daemon     bitaiird binary: orchestration, TUI, config, RPC auth, peer manager
+└── bitaiir-cli        bitaiir-cli binary: thin JSON-RPC client (cookie + --rpc-user)
 ```
 
-Cross-language test vectors in `tests/vectors/crypto.json` validate the Rust implementation against the Python reference implementation in `reference/python/`.
+Cross-language test vectors in `tests/vectors/crypto.json` validate the Rust implementation against the Python reference in `reference/python/`.
 
 ---
 
-## Genesis Block
-
-```
-Message: "Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos"
-```
-
----
-
-## Building from Source
+## Building and testing
 
 ```bash
-# Install Rust (if you don't have it)
+# Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
@@ -246,12 +281,24 @@ git clone https://github.com/bitaiir/bitaiir.git
 cd bitaiir
 cargo build --release
 
-# Run tests (102 tests)
-cargo test --workspace
+# Lints and tests (143 unit + integration tests)
+cargo fmt --all
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 
 # Install globally
 cargo install --path crates/bitaiir-daemon
 cargo install --path crates/bitaiir-cli
+```
+
+### Benchmarks
+
+```bash
+# Block PoW (Argon2id 64 MiB) hash rate, single-thread
+cargo run --release -p bitaiir-chain --example bench_block_pow
+
+# tx-PoW timing at priorities 1, 2, 5
+cargo run --release -p bitaiir-chain --example bench_tx_pow
 ```
 
 ### Windows
@@ -261,18 +308,48 @@ cargo install --path crates/bitaiir-cli
 git clone https://github.com/bitaiir/bitaiir.git
 cd bitaiir
 cargo build --release
-.\target\release\bitaiird.exe -i
+.\target\release\bitaiird.exe --testnet -i --mine
 ```
 
 ---
 
-## Data Directory
+## Data directory
 
-BitAiir stores its blockchain database in `./bitaiir_data/` (relative to the working directory). To start fresh, delete this directory:
+BitAiir stores chain data, wallet, and the auth cookie in a per-network directory:
+
+- Mainnet: `./bitaiir_data/`
+- Testnet: `./bitaiir_testnet_data/`
+
+To start fresh (e.g. after a consensus-level change in pre-mainnet):
 
 ```bash
-rm -rf bitaiir_data
+rm -rf bitaiir_testnet_data
 ```
+
+Override with `--data-dir <path>`.
+
+---
+
+## Genesis block
+
+```
+Mainnet message: "Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos"
+Testnet message: "BitAiir Testnet Genesis"
+```
+
+Each network mines its own genesis at first start with parameters fixed by the protocol, so every node arrives at the same block independently.
+
+---
+
+## Contributing
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR. Highlights:
+
+- All changes land via PR + squash merge — `master` is protected.
+- Conventional Commits (`type(scope): summary`) and DCO sign-off (`git commit -s`).
+- Lints/tests must be green on Linux, macOS, Windows, and a RISC-V cross-build.
+
+Security disclosures: see [`SECURITY.md`](SECURITY.md).
 
 ---
 
