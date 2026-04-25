@@ -2,7 +2,9 @@
 //!
 //! A single 24-word mnemonic seed phrase generates every key the
 //! wallet will ever need.  Derivation follows the BIP44 path
-//! `m/44'/8888'/0'/0/<index>` where 8888 is BitAiir's coin type.
+//! `m/44'/coin_type'/0'/0/<index>`.  The `coin_type` is supplied by
+//! the caller so this crate stays network-agnostic — see
+//! [`bitaiir_types::Network::bip44_coin_type`] for BitAiir's values.
 //!
 //! Flow:
 //! 1. Generate or import a BIP39 mnemonic (24 words, 256 bits).
@@ -14,9 +16,6 @@
 use crate::hash::hash160;
 use crate::key::{PrivateKey, PublicKey};
 use rand::RngCore;
-
-/// BIP44 coin type for BitAiir (unregistered placeholder).
-const COIN_TYPE: u32 = 8888;
 
 /// Generate a new 24-word BIP39 mnemonic from OS entropy.
 pub fn generate_mnemonic() -> bip39::Mnemonic {
@@ -32,17 +31,19 @@ pub fn parse_mnemonic(phrase: &str) -> Result<bip39::Mnemonic, String> {
 
 /// Derive a keypair at the given BIP44 index from a mnemonic.
 ///
-/// Path: `m/44'/8888'/0'/0/<index>`
+/// Path: `m/44'/<coin_type>'/0'/0/<index>`.  The caller supplies
+/// `coin_type` (8800 for BitAiir mainnet, 1 for any testnet per
+/// SLIP-0044).
 ///
 /// Returns `(private_key, public_key, address, recipient_hash)`.
 pub fn derive_keypair(
     mnemonic: &bip39::Mnemonic,
+    coin_type: u32,
     index: u32,
 ) -> (PrivateKey, PublicKey, String, [u8; 20]) {
     let seed = mnemonic.to_seed("");
 
-    // BIP44 path: m / 44' / 8888' / 0' / 0 / index
-    let path: bip32::DerivationPath = format!("m/44'/{COIN_TYPE}'/0'/0/{index}")
+    let path: bip32::DerivationPath = format!("m/44'/{coin_type}'/0'/0/{index}")
         .parse()
         .expect("valid BIP44 path");
 
@@ -77,27 +78,42 @@ mod tests {
         assert_eq!(m.to_string(), m2.to_string());
     }
 
+    /// Mainnet coin type — used by every test below that doesn't
+    /// specifically exercise the multi-network behaviour.
+    const TEST_COIN_TYPE: u32 = 8800;
+
     #[test]
     fn derivation_is_deterministic() {
         let m = generate_mnemonic();
-        let (_, _, addr1, _) = derive_keypair(&m, 0);
-        let (_, _, addr2, _) = derive_keypair(&m, 0);
+        let (_, _, addr1, _) = derive_keypair(&m, TEST_COIN_TYPE, 0);
+        let (_, _, addr2, _) = derive_keypair(&m, TEST_COIN_TYPE, 0);
         assert_eq!(addr1, addr2);
     }
 
     #[test]
     fn different_indices_produce_different_addresses() {
         let m = generate_mnemonic();
-        let (_, _, addr0, _) = derive_keypair(&m, 0);
-        let (_, _, addr1, _) = derive_keypair(&m, 1);
+        let (_, _, addr0, _) = derive_keypair(&m, TEST_COIN_TYPE, 0);
+        let (_, _, addr1, _) = derive_keypair(&m, TEST_COIN_TYPE, 1);
         assert_ne!(addr0, addr1);
+    }
+
+    #[test]
+    fn different_coin_types_produce_different_addresses() {
+        // Mainnet (8800) and testnet (1) must derive distinct
+        // addresses from the same seed — that's the whole point of
+        // the BIP44 coin_type field.
+        let m = generate_mnemonic();
+        let (_, _, mainnet_addr, _) = derive_keypair(&m, 8800, 0);
+        let (_, _, testnet_addr, _) = derive_keypair(&m, 1, 0);
+        assert_ne!(mainnet_addr, testnet_addr);
     }
 
     #[test]
     fn derived_key_can_sign_and_verify() {
         use crate::hash::double_sha256;
         let m = generate_mnemonic();
-        let (privkey, pubkey, _, _) = derive_keypair(&m, 0);
+        let (privkey, pubkey, _, _) = derive_keypair(&m, TEST_COIN_TYPE, 0);
         let digest = double_sha256(b"test message");
         let sig = privkey.sign_digest(&digest);
         assert!(pubkey.verify_digest(&digest, &sig));

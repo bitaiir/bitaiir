@@ -275,7 +275,9 @@ impl Wallet {
     pub fn generate_address(&mut self) -> String {
         if let Some(mnemonic) = &self.mnemonic {
             let idx = self.next_hd_index;
-            let (privkey, pubkey, addr_str, _) = bitaiir_crypto::hd::derive_keypair(mnemonic, idx);
+            let coin_type = bitaiir_types::Network::active().bip44_coin_type();
+            let (privkey, pubkey, addr_str, _) =
+                bitaiir_crypto::hd::derive_keypair(mnemonic, coin_type, idx);
             self.next_hd_index = idx + 1;
             self.keys.insert(addr_str.clone(), (privkey, pubkey));
             if !self.all_addresses.contains(&addr_str) {
