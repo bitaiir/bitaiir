@@ -227,6 +227,24 @@ A fresh node (no saved `known_peers`, no `--connect`) bootstraps from two compil
 
 Both lists are network-specific (mainnet/testnet) and live in `crates/bitaiir-daemon/src/peer_manager.rs`. They are currently empty — public infrastructure is registered ahead of v0.1.0.
 
+Operators can extend either list at runtime without recompiling:
+
+```bash
+bitaiird --seed 198.51.100.10:8444 --dns-seed seed.example.org
+bitaiird --no-dns-seeds                # skip DNS resolution entirely
+```
+
+Or via config:
+
+```toml
+[network]
+seed_nodes        = ["198.51.100.10:8444"]
+dns_seeds         = ["seed.example.org"]
+disable_dns_seeds = false
+```
+
+CLI > config > hardcoded; lists are additive. Full operator playbook (running a seed node, registering a DNS seeder, production checklist) in [`docs/seed-operator-guide.md`](docs/seed-operator-guide.md).
+
 ---
 
 ## Protocol summary
