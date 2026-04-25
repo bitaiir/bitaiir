@@ -23,10 +23,10 @@ use bitaiir_types::{Hash256, Transaction, encoding};
 use primitive_types::U256;
 
 /// Number of leading zero bits in the minimum anti-spam PoW target.
-/// Production: 24 bits (3 bytes, 1 in 16.7M, ~1.7s at 10M hash/s).
+/// Production: 20 bits (1 in 1.05M, ~1s on a commodity laptop).
 /// Tests: 8 bits (1 byte, 1 in 256, instant).
 #[cfg(not(test))]
-const MIN_TX_POW_LEADING_ZERO_BITS: u32 = 24;
+const MIN_TX_POW_LEADING_ZERO_BITS: u32 = 20;
 
 #[cfg(test)]
 const MIN_TX_POW_LEADING_ZERO_BITS: u32 = 8;
@@ -277,11 +277,8 @@ mod tests {
     #[test]
     fn min_target_matches_legacy_leading_zero_bytes() {
         // Sanity: the numeric min target is identical to "the
-        // hash's top MIN_LEADING_ZERO_BITS bits are zero", which is
-        // exactly the pre-refactor check.  Any hash whose top 3
-        // bytes are non-zero must fail; any hash whose top 3 bytes
-        // are zero must pass.  (Production uses 24 bits = 3 bytes;
-        // tests use 8 bits = 1 byte.)
+        // hash's top MIN_LEADING_ZERO_BITS bits are zero".
+        // Tests use 8 bits = 1 byte.
         let target = min_tx_pow_target();
         let leading_bytes = (MIN_TX_POW_LEADING_ZERO_BITS / 8) as usize;
 
