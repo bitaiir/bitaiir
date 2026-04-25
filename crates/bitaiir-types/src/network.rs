@@ -105,6 +105,20 @@ impl Network {
         }
     }
 
+    /// BIP44 `coin_type` used in HD derivation paths
+    /// `m/44'/coin_type'/0'/0/<index>`.
+    ///
+    /// Mainnet: `8800` (registered with SLIP-0044 as `AIIR`).
+    /// Testnet: `1` (the SLIP-0044 universal "any testnet" slot, so
+    /// hardware wallets in testnet mode produce matching addresses
+    /// without custom firmware).
+    pub fn bip44_coin_type(self) -> u32 {
+        match self {
+            Self::Mainnet => 8800,
+            Self::Testnet => 1,
+        }
+    }
+
     /// The phrase whose `hash160` produces the genesis burn address.
     /// Different phrases on each network produce different burn
     /// addresses and therefore different genesis blocks.

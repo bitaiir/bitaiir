@@ -105,7 +105,8 @@ a BitAiir artifact cannot be confused with a Bitcoin artifact.
 | Address prefix (string)        | `"aiir"`                                     | decided      |
 | Address version byte           | `0x00`                                       | decided      |
 | WIF version byte               | `0xfe`                                       | decided      |
-| BIP44 coin type                | `8888'` (unregistered placeholder)           | provisional  |
+| BIP44 coin type (mainnet)      | `8800'` (SLIP-0044 registration pending; symbol `AIIR`) | calibrated |
+| BIP44 coin type (testnet)      | `1'` (SLIP-0044 universal testnet slot)      | decided      |
 | Signed message prefix          | `"BitAiir Signed Message:\n"`                | decided      |
 | Atomic units per whole AIIR    | 100_000_000 (10^8)                           | decided      |
 | Initial block reward           | 100 AIIR                                     | provisional  |
@@ -1133,15 +1134,18 @@ The reference wallet is **hierarchical deterministic**:
   stored encrypted on disk (§14.3).
 - A BIP32 root seed is derived from the mnemonic + empty passphrase.
 - Per-address keys are derived at the BIP44 path
-  `m/44'/8888'/0'/0/<index>`, where `8888'` is BitAiir's unregistered
-  placeholder coin type.
+  `m/44'/<coin_type>'/0'/0/<index>`, where `coin_type` is **`8800`**
+  on mainnet and **`1`** on testnet. The testnet value is the
+  SLIP-0044 universal "any testnet" slot, so a Trezor or Ledger in
+  testnet mode produces matching addresses without custom firmware.
 - A wallet restore from mnemonic rebuilds every address deterministically;
   the node rescans the chain for outputs paying any of the rederived
   `hash160(pubkey)` values.
 
-The coin type `8888` is a provisional value that will be replaced by a
-SLIP-0044 registration once the protocol is stable enough to apply.
-Any change is a wallet-compatibility break, not a consensus break.
+The mainnet coin type `8800` is reserved for BitAiir (symbol `AIIR`);
+a SLIP-0044 PR registering it is pending. A change to either coin
+type is a wallet-compatibility break, not a consensus break — the
+chain itself doesn't read the BIP44 path.
 
 ### 14.2 RPC surface
 
@@ -1307,9 +1311,10 @@ before mainnet:
    in `peer_manager.rs` are currently empty; before v0.1.0 mainnet,
    at least two independently operated seed nodes and one DNS seeder
    per network must be registered.
-4. **BIP44 coin type.** `8888` is an unregistered placeholder; a
-   SLIP-0044 registration is needed before long-term wallet format
-   stability is promised.
+4. **BIP44 coin type.** Mainnet uses `8800` (symbol `AIIR`) with a
+   SLIP-0044 registration PR pending; testnet uses `1` per the
+   SLIP-0044 universal-testnet convention. Long-term wallet format
+   stability requires the upstream PR to land.
 5. **Replacement PoW** (section 9.8). If Argon2id is eventually
    circumvented, what replaces it and how is the fork activated?
 6. **Alias and escrow calibration.** The alias registration fee
@@ -1808,6 +1813,7 @@ decentralized. Tag line: "comércio com rede de segurança", not
 | 2026-04-21 | draft   | Add section 12 (fork choice and reorg): most-cumulative-work rule, disconnect/apply/persist phases, undo records, atomic in-memory snapshot + on-disk redb transaction. |
 | 2026-04-21 | draft   | Add section 13 (mempool): size-capped (default 50 MB), priority ordering, eviction policy, pending-spends for concurrent-send UTXO safety. |
 | 2026-04-21 | draft   | Add section 14 (wallet): HD BIP32/39/44 at path `m/44'/8888'/0'/0/<index>`, AES-256-GCM + Argon2id at rest. |
+| 2026-04-25 | draft   | BIP44 coin type calibrated: mainnet `8800` (SLIP-0044 PR pending, symbol `AIIR`), testnet `1` (universal). |
 | 2026-04-21 | draft   | Add section 15 (RPC interface): cookie auth, config-based auth + IP allowlist, opt-in TLS with self-signed or operator-provided cert. |
 | 2026-04-21 | draft   | Reduce open-questions list: DNS seeds have code structure, P2P plaintext decided for v1, genesis determinism resolves the earlier "genesis contents" open question. |
 | 2026-04-21 | draft   | Add extended output format (`output_type` discriminator on `TxOut`): type 0 = P2PKH (current), type 1 = escrow, type 2 = alias. Prerequisite for sections 20 and 21. |
