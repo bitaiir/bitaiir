@@ -247,6 +247,24 @@ CLI > config > hardcoded; lists are additive. Full operator playbook (running a 
 
 ---
 
+## Testnet faucet
+
+`bitaiir-faucet` is a small HTTP service that drips testnet AIIR to developer addresses. It does not hold keys — it talks to a local `bitaiird --testnet` over JSON-RPC and asks the daemon to `sendtoaddress`. The operator pre-funds the daemon by mining or by manual transfer.
+
+```bash
+./target/release/bitaiir-faucet \
+    --listen 127.0.0.1:8090 \
+    --drip-amount 10 --cooldown-secs 86400 --max-per-ip 5
+
+curl -X POST http://127.0.0.1:8090/drip \
+     -H 'Content-Type: application/json' \
+     -d '{"address":"aiir1..."}'
+```
+
+Two in-memory rate limits (per recipient address, per source IP) keep abuse bounded; restarting the faucet clears them. Operator playbook in [`docs/faucet-operator-guide.md`](docs/faucet-operator-guide.md).
+
+---
+
 ## Protocol summary
 
 | Parameter | Value |
@@ -281,7 +299,8 @@ crates/
 ├── bitaiir-net        P2P wire protocol, framing, compact blocks, block locator
 ├── bitaiir-rpc        JSON-RPC server (jsonrpsee) + wallet, alias / escrow / mining RPCs
 ├── bitaiir-daemon     bitaiird binary: orchestration, TUI, config, RPC auth, peer manager
-└── bitaiir-cli        bitaiir-cli binary: thin JSON-RPC client (cookie + --rpc-user)
+├── bitaiir-cli        bitaiir-cli binary: thin JSON-RPC client (cookie + --rpc-user)
+└── bitaiir-faucet     bitaiir-faucet binary: HTTP faucet for testnet (drips AIIR via the local daemon)
 ```
 
 Cross-language test vectors in `tests/vectors/crypto.json` validate the Rust implementation against the Python reference in `reference/python/`.

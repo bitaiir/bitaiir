@@ -1,0 +1,48 @@
+[package]
+name = "bitaiir-faucet"
+description = "BitAiir testnet faucet (`bitaiir-faucet`) — small HTTP service that drips testnet AIIR to developer addresses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bitaiir-faucet"
+path = "src/main.rs"
+
+[dependencies]
+# Address validation reuses the canonical Base58Check decoder.
+bitaiir-crypto = { workspace = true }
+
+# CLI parsing.
+clap = { workspace = true }
+
+# JSON-RPC client to the local bitaiird (same stack bitaiir-cli uses
+# so cookie auth + self-signed TLS work the same way).
+jsonrpsee = { workspace = true }
+
+# HTTP layer for the public faucet endpoint.
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+http = { workspace = true }
+
+# TLS for talking to the daemon's HTTPS RPC.
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Auth header encoding (HTTP Basic).
+base64 = { workspace = true }
+
+# Async runtime.
+tokio = { workspace = true }
+
+# JSON serialization on the public HTTP API.
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Structured logging.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
