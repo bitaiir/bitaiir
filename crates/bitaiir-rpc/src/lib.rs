@@ -1453,312 +1453,46 @@ impl BitaiirApiServer for BitaiirRpcImpl {
     }
 
     async fn add_peer(&self, addr: String) -> RpcResult<serde_json::Value> {
-        use tokio::net::TcpStream;
-
-        let stream = TcpStream::connect(&addr).await.map_err(|e| {
-            jsonrpsee::types::ErrorObjectOwned::owned(
-                -10,
-                format!("failed to connect to {addr}: {e}"),
-                None::<()>,
-            )
-        })?;
-
-        let peer_addr = stream.peer_addr().unwrap_or_else(|_| addr.parse().unwrap());
-        let mut peer = bitaiir_net::Peer::new(stream, peer_addr);
-
-        let our_height = {
-            let state = self.state.read().await;
-            state.chain.height()
-        };
-
-        let their_version = peer.handshake_outbound(our_height).await.map_err(|e| {
-            jsonrpsee::types::ErrorObjectOwned::owned(
-                -11,
-                format!("handshake failed: {e}"),
-                None::<()>,
-            )
-        })?;
-
-        // If the peer has more blocks, sync them.
-        let mut synced_blocks: u64 = 0;
-        if their_version.best_height > our_height {
-            tracing::info!(
-                "peer is ahead: their height={}, ours={}. Syncing...",
-                their_version.best_height,
-                our_height,
-            );
-
-            peer.send(&bitaiir_net::NetMessage::GetBlocks(our_height))
-                .await
-                .map_err(|e| {
-                    jsonrpsee::types::ErrorObjectOwned::owned(
-                        -12,
-                        format!("failed to request blocks: {e}"),
-                        None::<()>,
-                    )
-                })?;
-
-            // Receive blocks until SyncDone.
-            loop {
-                let msg = peer.receive().await.map_err(|e| {
-                    jsonrpsee::types::ErrorObjectOwned::owned(
-                        -13,
-                        format!("sync error: {e}"),
-                        None::<()>,
-                    )
-                })?;
-
-                match msg {
-                    bitaiir_net::NetMessage::BlockData(bytes) => {
-                        let block: bitaiir_types::Block =
-                            bitaiir_types::encoding::from_bytes(&bytes).map_err(|e| {
-                                jsonrpsee::types::ErrorObjectOwned::owned(
-                                    -14,
-                                    format!("invalid block data: {e}"),
-                                    None::<()>,
-                                )
-                            })?;
-
-                        let mut state = self.state.write().await;
-                        let height = state.chain.height() + 1;
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
-
-                        // Validate the block (skip future-timestamp for synced blocks).
-                        if let Err(e) = bitaiir_chain::validate_block(
-                            &block,
-                            &state.chain,
-                            &state.utxo,
-                            now + 7200,
-                        ) {
-                            tracing::warn!(
-                                "synced block at height {height} failed validation: {e}"
-                            );
-                            break;
-                        }
-
-                        state.chain.push(block.clone()).unwrap();
-                        // Apply the block's transactions to the UTXO
-                        // set and capture the undo record in a
-                        // single pass; persist both atomically.
-                        let undo = match state.utxo.apply_block_with_undo(&block, height) {
-                            Ok(u) => u,
-                            Err(e) => {
-                                tracing::warn!("synced block {height} UTXO apply failed: {e}");
-                                break;
-                            }
-                        };
-
-                        // Persist.
-                        if let Err(e) = self.storage.apply_block(height, &block, &undo) {
-                            tracing::warn!("failed to persist synced block {height}: {e}");
-                        }
-
-                        // Remove confirmed txs from mempool.
-                        for tx in block.transactions.iter().skip(1) {
-                            state.mempool.remove(&tx.txid());
-                        }
-
-                        synced_blocks += 1;
-                        tracing::info!("synced block {height}");
-                    }
-                    bitaiir_net::NetMessage::SyncDone => {
-                        tracing::info!("sync complete: {synced_blocks} blocks received");
-                        break;
-                    }
-                    _ => {} // ignore other messages during sync
-                }
-            }
-        }
-
-        let new_height = {
-            let state = self.state.read().await;
-            state.chain.height()
-        };
-
-        // Keep the peer connection alive for tx gossip. Split into
-        // reader/writer, spawn a background task that multiplexes
-        // incoming messages with outgoing tx broadcasts.
-        let (reader, writer, peer_addr) = peer.into_parts();
-        let (tx_send, mut tx_recv) = tokio::sync::mpsc::channel::<bitaiir_net::NetMessage>(100);
-
-        // Register this peer's metadata + sender channel in shared state,
-        // and add/update the known-peer database so the PeerManager can
-        // reconnect if the connection drops later.
-        let peer_addr_key = peer_addr.to_string();
-        {
-            let mut state = self.state.write().await;
-            state.peers.push(ConnectedPeer {
-                addr: peer_addr_key.clone(),
-                user_agent: their_version.user_agent.clone(),
-                best_height: their_version.best_height,
-                direction: PeerDirection::Outbound,
-                connected_at: std::time::Instant::now(),
-                sender: tx_send,
+        // Add the peer to known_peers so the peer_manager connects on
+        // its next tick using the full gossip loop (compact blocks,
+        // header sync, rate limiting — the same path as --connect).
+        let mut state = self.state.write().await;
+        let already_connected = state.peers.iter().any(|p| p.addr == addr);
+        state
+            .known_peers
+            .entry(addr.clone())
+            .and_modify(|p| {
+                p.consecutive_failures = 0;
+                p.banned_until = 0;
+            })
+            .or_insert_with(|| KnownPeer {
+                addr: addr.clone(),
+                last_seen: 0,
+                consecutive_failures: 0,
+                banned_until: 0,
+                source: PeerSource::Manual,
             });
-            // Upsert known peer (or update existing entry on success).
-            let kp = state
-                .known_peers
-                .entry(addr.clone())
-                .or_insert_with(|| KnownPeer {
-                    addr: addr.clone(),
-                    last_seen: 0,
-                    consecutive_failures: 0,
-                    banned_until: 0,
-                    source: PeerSource::Manual,
-                });
-            kp.record_success();
+        drop(state);
+
+        let _ = self.storage.save_known_peer(&addr, 0, 0, 0, 0);
+
+        if already_connected {
+            Ok(serde_json::json!({
+                "peer": addr,
+                "status": "already connected",
+            }))
+        } else {
+            Ok(serde_json::json!({
+                "peer": addr,
+                "status": "added, peer_manager will connect shortly",
+            }))
         }
-        // Event line for the interactive TUI (plain text — the TUI
-        // doesn't re-parse colors for free-form event strings).
-        self.emit(format!(
-            "  peer connected: {peer_addr_key} (outbound, {}, height {})",
-            their_version.user_agent, their_version.best_height,
-        ));
-
-        let gossip_state = self.state.clone();
-        let gossip_storage: Option<Arc<Storage>> = Some(self.storage.clone());
-        let gossip_events = self.events.clone();
-        let gossip_peer_key = peer_addr_key.clone();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-            let mut reader = reader;
-            let mut writer = writer;
-
-            loop {
-                tokio::select! {
-                    // Outgoing: forward tx broadcasts from sendtoaddress
-                    msg = tx_recv.recv() => {
-                        match msg {
-                            Some(m) => {
-                                let payload = m.to_payload();
-                                let frame = bitaiir_net::protocol::frame_message(m.command(), &payload);
-                                if writer.write_all(&frame).await.is_err() {
-                                    break;
-                                }
-                                let _ = writer.flush().await;
-                            }
-                            None => break, // channel closed
-                        }
-                    }
-                    // Incoming: read messages from the peer
-                    result = async {
-                        let mut header_buf = [0u8; bitaiir_net::protocol::HEADER_SIZE];
-                        reader.read_exact(&mut header_buf).await?;
-                        let header = bitaiir_net::protocol::parse_header(&header_buf)
-                            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad magic"))?;
-                        let mut payload = vec![0u8; header.payload_len as usize];
-                        if !payload.is_empty() {
-                            reader.read_exact(&mut payload).await?;
-                        }
-                        Ok::<_, std::io::Error>(
-                            bitaiir_net::NetMessage::from_payload(&header.command, &payload)
-                        )
-                    } => {
-                        match result {
-                            Ok(Some(bitaiir_net::NetMessage::TxData(bytes))) => {
-                                if let Ok(tx) = bitaiir_types::encoding::from_bytes::<bitaiir_types::Transaction>(&bytes) {
-                                    let txid = tx.txid();
-                                    let mut s = gossip_state.write().await;
-                                    if s.mempool.contains(&txid) {
-                                        // Already in pool — silent no-op.
-                                    } else {
-                                        // Validate before accepting (same
-                                        // gate as `peer_manager`'s TxData
-                                        // handler — without it any peer
-                                        // can push arbitrary bytes into
-                                        // the mempool).
-                                        let next_height = s.chain.height() + 1;
-                                        if let Err(e) = bitaiir_chain::validate_transaction(
-                                            &tx,
-                                            &s.utxo,
-                                            next_height,
-                                        ) {
-                                            tracing::warn!(
-                                                "peer {peer_addr}: rejected tx {txid}: {e}",
-                                            );
-                                        } else if let Err(e) = s.mempool.add(tx) {
-                                            tracing::warn!(
-                                                "peer {peer_addr}: mempool rejected tx {txid}: {e}",
-                                            );
-                                        } else {
-                                            tracing::info!("received tx {txid} from peer {peer_addr}");
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(Some(bitaiir_net::NetMessage::BlockData(bytes))) => {
-                                if let Ok(block) = bitaiir_types::encoding::from_bytes::<bitaiir_types::Block>(&bytes) {
-                                    let mut s = gossip_state.write().await;
-                                    let height = s.chain.height() + 1;
-                                    let now = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs();
-                                    if let Ok(()) = bitaiir_chain::validate_block(&block, &s.chain, &s.utxo, now + 7200) {
-                                        if s.chain.push(block.clone()).is_ok() {
-                                            if let Ok(undo) = s.utxo.apply_block_with_undo(&block, height) {
-                                                if let Some(storage) = gossip_storage.as_ref() {
-                                                    let _ = storage.apply_block(height, &block, &undo);
-                                                }
-                                                // Remove confirmed txs from mempool.
-                                                for tx in block.transactions.iter().skip(1) {
-                                                    s.mempool.remove(&tx.txid());
-                                                }
-                                                for p in &mut s.peers {
-                                                    if p.addr == gossip_peer_key {
-                                                        p.best_height = p.best_height.max(height);
-                                                        break;
-                                                    }
-                                                }
-                                                tracing::info!("received block {height} from peer {peer_addr}");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(Some(bitaiir_net::NetMessage::Ping(n))) => {
-                                let pong = bitaiir_net::NetMessage::Pong(n);
-                                let payload = pong.to_payload();
-                                let frame = bitaiir_net::protocol::frame_message(pong.command(), &payload);
-                                let _ = writer.write_all(&frame).await;
-                                let _ = writer.flush().await;
-                            }
-                            Ok(_) => {} // ignore other messages
-                            Err(_) => {
-                                tracing::info!("peer {peer_addr} disconnected (gossip)");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Peer is gone — remove it from NodeState so it no longer
-            // shows up in `listpeers` and we stop trying to broadcast
-            // to it.  Emit an event line for the TUI.
-            {
-                let mut s = gossip_state.write().await;
-                s.peers.retain(|p| p.addr != gossip_peer_key);
-            }
-            if let Some(ev) = &gossip_events {
-                let _ = ev.send(format!("  peer disconnected: {gossip_peer_key}"));
-            }
-        });
-
-        Ok(serde_json::json!({
-            "peer": addr,
-            "user_agent": their_version.user_agent,
-            "peer_height": their_version.best_height,
-            "protocol_version": their_version.protocol_version,
-            "synced_blocks": synced_blocks,
-            "new_height": new_height,
-            "status": if synced_blocks > 0 { "connected, synced, gossiping" } else { "connected, gossiping" },
-        }))
     }
+
+    // --- REMOVED: the old 300-line inline connect + sync + mini gossip
+    // loop.  All peer connections now route through peer_manager's
+    // run_gossip_loop which handles compact blocks, header-first sync,
+    // rate limiting, and reorg. ---
 
     async fn get_transaction(&self, txid_hex: String) -> RpcResult<serde_json::Value> {
         let target = txid_hex.parse::<Hash256>().map_err(|_| {
