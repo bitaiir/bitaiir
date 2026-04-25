@@ -32,6 +32,7 @@ members = [
     "crates/bitaiir-rpc",
     "crates/bitaiir-daemon",
     "crates/bitaiir-cli",
+    "crates/bitaiir-faucet",
 ]
 
 [workspace.package]
@@ -107,6 +108,11 @@ jsonrpsee = { version = "0.24", features = ["server", "http-client", "macros"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["auth"] }
 http = "1"
+
+# HTTP server framework — used by `bitaiir-faucet` to expose its
+# `POST /drip` endpoint.  Axum 0.7 is on tower 0.4 / http 1, so it
+# unifies with the rest of the stack.
+axum = "0.7"
 
 # CIDR/IP-network parsing for the `rpc.allow_ip` allowlist.
 ipnet = "2"
