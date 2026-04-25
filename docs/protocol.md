@@ -115,7 +115,7 @@ a BitAiir artifact cannot be confused with a Bitcoin artifact.
 | Target block time              | 5 seconds                                    | provisional  |
 | Difficulty retarget interval   | 20 blocks                                    | provisional  |
 | Max difficulty adjustment      | 4× per retarget                              | provisional  |
-| Initial difficulty `bits`      | `0x2000ffff`                                 | provisional  |
+| Initial difficulty `bits`      | `0x2001fffe` (~5 s on a 4-thread commodity laptop) | calibrated   |
 | Proof of work                  | Proof of Aiir (SHA-256d + Argon2id wrap)     | provisional  |
 | Argon2id memory cost           | 65_536 KiB (64 MiB)                          | provisional  |
 | Argon2id time cost             | 1 iteration                                  | provisional  |
@@ -716,16 +716,24 @@ A block is valid if and only if its `aiir_pow` hash, treated as a
 
 ### 9.4 Difficulty adjustment
 
-Every **20 blocks** (approximately 100 seconds at the target block
-time), the network recomputes the target from the time it took to mine
-the previous 20-block window:
+Every **20 blocks**, the network recomputes the target from the time
+it took to mine the previous window:
 
 ```
-actual_time   = block[i].timestamp - block[i - 20].timestamp
-expected_time = 20 * 5             // 100 seconds
+window_start  = max(1, height_being_mined - 20)
+window_end    = height_being_mined - 1
+actual_time   = block[window_end].timestamp - block[window_start].timestamp
+expected_time = (window_end - window_start) * 5    // seconds
 
 new_target = old_target * actual_time / expected_time
 ```
+
+The window deliberately **excludes the genesis block (height 0)**:
+genesis carries a fixed protocol timestamp that has no relation to
+real mining time, so including it would make the very first retarget
+see a multi-day gap and clamp to the maximum 4× swing. The first
+retarget therefore covers 18 inter-block intervals (blocks 1..19);
+every subsequent retarget covers 19 intervals.
 
 The ratio `actual_time / expected_time` is clamped to the range
 `[1/4, 4]` to prevent a single window from changing the difficulty by
@@ -741,10 +749,9 @@ batch retarget is the v1 choice for implementation simplicity.
 ### 9.5 Initial difficulty
 
 The genesis block and every block up to and including block 19 use
-the hardcoded `bits = 0x2000ffff`. This target is deliberately easy so
-that the first miners, running Proof of Aiir on commodity CPUs, can
-produce blocks at roughly the target rate even without Argon2id
-optimization. The first retarget happens at block 20.
+the hardcoded `bits = 0x2001fffe`. This gives roughly one winning hash
+in 128, calibrated for ~5 s blocks on a 4-thread commodity laptop
+running Argon2id at 64 MiB. The first retarget happens at block 20.
 
 ### 9.6 Median time past
 
@@ -1254,7 +1261,7 @@ without any external data. The inputs are:
   one holds a private key whose public key hashes to that 20-byte
   value.
 - A linear nonce search from `0` upward against
-  `bits = 0x2000ffff` (§9.5).
+  `bits = 0x2001fffe` (§9.5).
 
 Because all inputs are fixed and the search is purely `aiir_pow` at
 the initial target, two nodes that have never communicated arrive at
@@ -1266,7 +1273,7 @@ nodes' disks from their first tick without any bootstrap data.
 - **Coinbase message:** `"Poder360 29/03/2026 Master deixa rombo de R$ 52 bi no FGC e de R$ 2 bi em fundos"`
 - **Timestamp:** 2026-03-29 00:00:00 UTC (Unix `1743206400`).
 - **Burn phrase:** `"BitAiir Genesis Burn"`.
-- **bits:** `0x2000ffff`.
+- **bits:** `0x2001fffe`.
 - **Nonce:** found by deterministic search (first `u32` such that
   `aiir_pow(header)` meets `bits`).
 
@@ -1275,7 +1282,7 @@ nodes' disks from their first tick without any bootstrap data.
 - **Coinbase message:** `"BitAiir Testnet Genesis"`.
 - **Timestamp:** 2026-04-06 00:00:00 UTC (Unix `1743897600`).
 - **Burn phrase:** `"BitAiir Testnet Genesis Burn"`.
-- **bits:** `0x2000ffff`.
+- **bits:** `0x2001fffe`.
 - **Nonce:** found by deterministic search, as on mainnet.
 
 The different timestamp, message, and burn phrase guarantee that the
@@ -1292,7 +1299,7 @@ before mainnet:
 1. **Precise tx-level PoW target.** The provisional value in section
    7.7 needs to be calibrated against real hardware so that a median
    commodity laptop finds a priority-1 nonce in approximately 2 seconds.
-2. **Initial Proof-of-Aiir difficulty.** The `bits = 0x2000ffff`
+2. **Initial Proof-of-Aiir difficulty.** The `bits = 0x2001fffe`
    initial value must be validated against real CPU performance so
    that the first 20 blocks take roughly `20 * 5 = 100 seconds` on a
    single-laptop bootstrap network.

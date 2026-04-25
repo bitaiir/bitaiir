@@ -62,9 +62,6 @@ pub const RETARGET_INTERVAL: u64 = 20;
 /// Target block time in seconds (protocol §2).
 pub const TARGET_BLOCK_TIME: u64 = 5;
 
-/// The expected wall-clock time for one retarget window, in seconds.
-pub const RETARGET_EXPECTED_TIME: u64 = RETARGET_INTERVAL * TARGET_BLOCK_TIME;
-
 /// Number of preceding blocks used to compute the median-time-past
 /// (protocol §8.6).
 pub const MEDIAN_TIME_SPAN: usize = 11;

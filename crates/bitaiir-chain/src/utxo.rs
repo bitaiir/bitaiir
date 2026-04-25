@@ -378,6 +378,7 @@ impl core::fmt::Debug for UtxoSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target::CompactTarget;
     use crate::test_util::{sample_coinbase, sample_normal_tx};
     use bitaiir_types::{Amount, Hash256, OutPoint, TxOut};
 
@@ -532,7 +533,7 @@ mod tests {
                 prev_block_hash: Hash256::ZERO,
                 merkle_root: merkle,
                 timestamp: 0,
-                bits: 0x2000_ffff,
+                bits: CompactTarget::INITIAL.to_bits(),
                 // `nonce` uniqueness keeps the block_hash distinct
                 // when height changes, so our undo-hash sanity check
                 // can differentiate the two blocks.
@@ -554,7 +555,7 @@ mod tests {
                 prev_block_hash: Hash256::ZERO,
                 merkle_root: merkle,
                 timestamp: 0,
-                bits: 0x2000_ffff,
+                bits: CompactTarget::INITIAL.to_bits(),
                 nonce: height as u32,
             },
             transactions: vec![coinbase, normal],
@@ -656,7 +657,7 @@ mod tests {
                 prev_block_hash: Hash256::ZERO,
                 merkle_root: merkle,
                 timestamp: 0,
-                bits: 0x2000_ffff,
+                bits: CompactTarget::INITIAL.to_bits(),
                 nonce: 10,
             },
             transactions: vec![coinbase, tx_a, tx_b],
