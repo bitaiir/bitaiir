@@ -33,13 +33,12 @@ pub struct CompactTarget(u32);
 
 impl CompactTarget {
     /// The hardcoded initial difficulty used by the genesis block and
-    /// every block up to and including block 143, before the first
-    /// retarget. See protocol §8.5.
+    /// every block up to the first retarget. See protocol §8.5.
     ///
-    /// `0x2000ffff` decodes to a target equal to
-    /// `0x00ffff × 2 ^ 232`, which as a big-endian 32-byte value is
-    /// `00 ff ff 00 00 … 00`. Roughly one hash in 256 meets it.
-    pub const INITIAL: Self = Self(0x2000_ffff);
+    /// `0x2001fffe` decodes to a target equal to
+    /// `0x01fffe × 2 ^ 232`. Roughly one hash in 128 meets it,
+    /// giving ~5 s blocks on a commodity 4-thread laptop.
+    pub const INITIAL: Self = Self(0x2001_fffe);
 
     /// Wrap a raw `bits` value without validation. Call
     /// [`Self::to_target`] to check whether the encoding is
@@ -159,19 +158,19 @@ mod tests {
     #[test]
     fn initial_target_round_trip() {
         let ct = CompactTarget::INITIAL;
-        assert_eq!(ct.to_bits(), 0x2000_ffff);
-        assert_eq!(CompactTarget::from_bits(0x2000_ffff), ct);
+        assert_eq!(ct.to_bits(), 0x2001_fffe);
+        assert_eq!(CompactTarget::from_bits(0x2001_fffe), ct);
     }
 
     #[test]
-    fn initial_target_expands_to_leading_zero_ffff() {
-        // 0x2000ffff: exponent = 0x20 = 32, mantissa = 0x00ffff
+    fn initial_target_expands_correctly() {
+        // 0x2001fffe: exponent = 0x20 = 32, mantissa = 0x01fffe
         // offset = 32 - 32 = 0, so the mantissa lands in the first
-        // three bytes: [0x00, 0xff, 0xff, 0x00, 0x00, ..., 0x00]
+        // three bytes: [0x01, 0xff, 0xfe, 0x00, 0x00, ..., 0x00]
         let target = CompactTarget::INITIAL.to_target().unwrap();
-        assert_eq!(target[0], 0x00);
+        assert_eq!(target[0], 0x01);
         assert_eq!(target[1], 0xff);
-        assert_eq!(target[2], 0xff);
+        assert_eq!(target[2], 0xfe);
         for &byte in target[3..].iter() {
             assert_eq!(byte, 0x00);
         }
@@ -230,12 +229,11 @@ mod tests {
 
     #[test]
     fn hash_one_greater_than_target_is_rejected() {
-        // INITIAL target starts with 0x00 0xff 0xff ... 0x00. We
-        // construct a hash that is numerically one greater by
-        // changing the leading 0x00 to 0x01, which pushes us past
-        // the target in the big-endian ordering.
+        // INITIAL target starts with 0x01 0xff 0xfe ... 0x00. We
+        // construct a hash that is numerically greater by bumping
+        // the leading byte to 0x02.
         let mut hash = CompactTarget::INITIAL.to_target().unwrap();
-        hash[0] = 0x01;
+        hash[0] = 0x02;
         assert!(!CompactTarget::INITIAL.hash_meets_target(&hash));
     }
 
@@ -273,7 +271,7 @@ mod tests {
         // hashes to mine, so carries less work than a block with a
         // higher difficulty (hard target).  0x1d00ffff is Bitcoin's
         // minimum difficulty, considerably harder than the initial
-        // 0x2000ffff used in our genesis.
+        // 0x2001fffe used in our genesis.
         let easy = CompactTarget::INITIAL.work();
         let hard = CompactTarget::from_bits(0x1d00_ffff).work();
         assert!(hard > easy, "harder target must carry more work");
@@ -297,20 +295,19 @@ mod tests {
 
     #[test]
     fn initial_target_work_matches_expected_magnitude() {
-        // The initial target is `0x00ffff000...00` (32 bytes) which
-        // as U256 is approximately `0xffff * 2^232`.  Plugging into
+        // The initial target is `0x01fffe000...00` (32 bytes) which
+        // as U256 is approximately `0x01fffe * 2^232`.  Plugging into
         // the formula:
         //
-        //   work ≈ 2^256 / (0xffff * 2^232) ≈ 2^24 / 0xffff ≈ 256
+        //   work ≈ 2^256 / (0x01fffe * 2^232) ≈ 2^24 / 0x01fffe ≈ 128
         //
-        // The exact value is 257 after the `+1` adjustment.  We
-        // assert a small window around it so the test is robust to
-        // any rounding in the formula.
+        // We assert a small window around it so the test is robust
+        // to any rounding in the formula.
         let w = CompactTarget::INITIAL.work();
         assert!(!w.is_zero());
         assert!(
-            w >= U256::from(200u32) && w <= U256::from(300u32),
-            "initial-target work {w} outside expected [200, 300] window",
+            w >= U256::from(100u32) && w <= U256::from(160u32),
+            "initial-target work {w} outside expected [100, 160] window",
         );
     }
 }

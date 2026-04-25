@@ -13,7 +13,7 @@
 use bitaiir_types::{Amount, Block, BlockHeader, Hash256, OutPoint, Transaction, TxIn, TxOut};
 
 use crate::chain::Chain;
-use crate::consensus::{MAX_BLOCK_SIZE, RETARGET_EXPECTED_TIME, RETARGET_INTERVAL};
+use crate::consensus::{MAX_BLOCK_SIZE, RETARGET_INTERVAL, TARGET_BLOCK_TIME};
 use crate::mempool::Mempool;
 use crate::pow::aiir_pow;
 use crate::subsidy::subsidy;
@@ -181,8 +181,14 @@ pub fn required_bits(chain: &Chain, height: u64) -> u32 {
     }
 
     // Retarget: measure how long the last window actually took.
+    //
+    // We skip genesis (block 0) from the window because its timestamp
+    // is a fixed protocol constant that does not reflect actual mining
+    // time — including it would make the first retarget see a huge
+    // gap (days or weeks between the hardcoded genesis date and the
+    // moment block 1 was mined) and clamp to the maximum 4× swing.
     let window_end = chain.height(); // The last block in the previous window.
-    let window_start = window_end - (RETARGET_INTERVAL - 1);
+    let window_start = window_end.saturating_sub(RETARGET_INTERVAL - 1).max(1);
 
     let start_time = chain
         .header_at(window_start)
@@ -194,7 +200,11 @@ pub fn required_bits(chain: &Chain, height: u64) -> u32 {
         .timestamp;
 
     let actual_time = end_time.saturating_sub(start_time);
-    let expected_time = RETARGET_EXPECTED_TIME;
+    // Number of inter-block intervals actually contained in the
+    // window.  For the first retarget (window starts at block 1) this
+    // is RETARGET_INTERVAL - 2; for every subsequent retarget it is
+    // RETARGET_INTERVAL - 1.
+    let expected_time = (window_end - window_start) * TARGET_BLOCK_TIME;
 
     // Clamp the ratio to [1/4, 4] to prevent wild swings.
     let actual_clamped = actual_time.max(expected_time / 4).min(expected_time * 4);

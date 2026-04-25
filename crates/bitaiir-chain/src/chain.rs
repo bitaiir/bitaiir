@@ -771,7 +771,7 @@ mod tests {
         // wins immediately because its individual work beats A's.
         //
         // `sample_block` uses `CompactTarget::INITIAL.to_bits()`
-        // (0x2000ffff) which contributes ~257 work per block.  We
+        // which contributes ~128 work per block.  We
         // use 0x1f00ffff on the competing branch, which is a
         // strictly harder target and contributes much more work.
         let genesis_bits = CompactTarget::INITIAL.to_bits();
