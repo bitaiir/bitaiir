@@ -331,12 +331,15 @@ cargo install --path crates/bitaiir-cli
 ### Benchmarks
 
 ```bash
-# Block PoW (Argon2id 64 MiB) hash rate, single-thread
+# Block PoW (Argon2id 64 MiB) hash rate; --threads N for parallel mode
 cargo run --release -p bitaiir-chain --example bench_block_pow
+cargo run --release -p bitaiir-chain --example bench_block_pow -- --threads 4
 
 # tx-PoW timing at priorities 1, 2, 5
 cargo run --release -p bitaiir-chain --example bench_tx_pow
 ```
+
+Output format, methodology, and a community-contributed results table for various CPUs live in [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ### Windows
 
