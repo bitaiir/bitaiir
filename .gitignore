@@ -147,6 +147,8 @@ bitaiir_data/
 bitaiir_testnet_data/
 data_a/
 data_b/
+bitaiir_seeder_data/
+seeder-data/
 
 # RPC auth cookie files (never committed — machine-local, per-startup)
 .cookie

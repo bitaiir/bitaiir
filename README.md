@@ -243,7 +243,7 @@ dns_seeds         = ["seed.example.org"]
 disable_dns_seeds = false
 ```
 
-CLI > config > hardcoded; lists are additive. Full operator playbook (running a seed node, registering a DNS seeder, production checklist) in [`docs/seed-operator-guide.md`](docs/seed-operator-guide.md).
+CLI > config > hardcoded; lists are additive. Full operator playbook for static-IP seed nodes is in [`docs/seed-operator-guide.md`](docs/seed-operator-guide.md); for hosting a DNS seeder with `bitaiir-seeder` (crawler + authoritative DNS server), see [`docs/seeder-operator-guide.md`](docs/seeder-operator-guide.md).
 
 ---
 
@@ -313,7 +313,8 @@ crates/
 ├── bitaiir-rpc        JSON-RPC server (jsonrpsee) + wallet, alias / escrow / mining RPCs
 ├── bitaiir-daemon     bitaiird binary: orchestration, TUI, config, RPC auth, peer manager
 ├── bitaiir-cli        bitaiir-cli binary: thin JSON-RPC client (cookie + --rpc-user)
-└── bitaiir-faucet     bitaiir-faucet binary: HTTP faucet for testnet (drips AIIR via the local daemon)
+├── bitaiir-faucet     bitaiir-faucet binary: HTTP faucet for testnet (drips AIIR via the local daemon)
+└── bitaiir-seeder     bitaiir-seeder binary: DNS seeder — crawler + authoritative DNS server
 ```
 
 Cross-language test vectors in `tests/vectors/crypto.json` validate the Rust implementation against the Python reference in `reference/python/`.

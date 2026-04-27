@@ -33,6 +33,7 @@ members = [
     "crates/bitaiir-daemon",
     "crates/bitaiir-cli",
     "crates/bitaiir-faucet",
+    "crates/bitaiir-seeder",
 ]
 
 [workspace.package]
