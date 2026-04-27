@@ -27,6 +27,7 @@ tui = ["dep:arboard", "dep:crossterm"]
 
 [dependencies]
 arboard = { workspace = true, optional = true }
+axum = { workspace = true }
 base64 = { workspace = true }
 bitaiir-chain = { workspace = true }
 bitaiir-crypto = { workspace = true }

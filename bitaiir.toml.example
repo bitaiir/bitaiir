@@ -111,3 +111,12 @@
 # tls = false
 # tls_cert_path = "/etc/letsencrypt/live/node.example.com/fullchain.pem"
 # tls_key_path  = "/etc/letsencrypt/live/node.example.com/privkey.pem"
+
+[metrics]
+# Bind address for the Prometheus metrics endpoint.  When unset, the
+# server is not started.  The endpoint has no authentication and
+# emits only chain / network / mempool / mining counters — no wallet
+# data — but still bind to localhost and front it with a reverse
+# proxy if you want external scraping.  Equivalent to the
+# --metrics-addr CLI flag.
+# addr = "127.0.0.1:8095"

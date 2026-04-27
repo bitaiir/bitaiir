@@ -27,6 +27,8 @@ pub struct Config {
     pub mempool: MempoolConfig,
     #[serde(default)]
     pub rpc: RpcConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -122,6 +124,16 @@ pub struct RpcConfig {
     /// Path to a PEM-encoded TLS private key.  Only read when
     /// `tls = true`.  When unset, defaults to `<data_dir>/rpc.key`.
     pub tls_key_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct MetricsConfig {
+    /// Bind address for the Prometheus metrics endpoint, e.g.
+    /// `"127.0.0.1:8095"`.  When unset (the default), the metrics
+    /// server is not started.  The server has no auth — bind to
+    /// localhost and front it with a reverse proxy if you need
+    /// external access.
+    pub addr: Option<String>,
 }
 
 // -------------------------------------------------------------------------
@@ -249,6 +261,13 @@ pub fn write_default_config(path: &Path) {
 # tls = false
 # tls_cert_path = "/etc/letsencrypt/live/node.example.com/fullchain.pem"
 # tls_key_path  = "/etc/letsencrypt/live/node.example.com/privkey.pem"
+
+[metrics]
+# Bind address for the Prometheus metrics endpoint.  When unset, the
+# server is not started.  The endpoint has no auth — keep it on
+# localhost and reverse-proxy if you need external access.  Equivalent
+# to the --metrics-addr CLI flag.
+# addr = "127.0.0.1:8095"
 "#;
     let _ = std::fs::write(path, template);
 }

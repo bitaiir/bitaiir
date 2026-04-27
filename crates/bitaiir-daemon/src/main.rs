@@ -31,6 +31,7 @@ use tokio::sync::RwLock;
 
 mod config;
 mod log;
+mod metrics;
 mod peer_manager;
 mod rpc_auth;
 mod tls;
@@ -84,6 +85,12 @@ struct Args {
     /// Number of parallel mining threads. [default: min(4, cores/2)]
     #[arg(long)]
     mining_threads: Option<usize>,
+    /// Enable the Prometheus metrics endpoint and bind it to the
+    /// given `ip:port` (e.g. `127.0.0.1:8095`).  Off when unset.
+    /// Bind to localhost and front it with a reverse proxy if you
+    /// want external access — the metrics server has no auth.
+    #[arg(long)]
+    metrics_addr: Option<String>,
 }
 
 /// Resolved settings after merging CLI > config > defaults.
@@ -104,6 +111,9 @@ struct Settings {
     /// DNS seed hostnames the daemon will resolve every hour.
     /// Empty when `--no-dns-seeds` / `disable_dns_seeds = true`.
     dns_seeds: Vec<String>,
+    /// Bind address for the Prometheus metrics endpoint (e.g.
+    /// `127.0.0.1:8095`).  `None` disables the endpoint entirely.
+    metrics_addr: Option<String>,
 }
 
 impl Settings {
@@ -180,6 +190,11 @@ impl Settings {
         let disable_dns = args.no_dns_seeds || cfg.network.disable_dns_seeds.unwrap_or(false);
         let dns_seeds = peer_manager::resolve_dns_seeds(&dns_extra, disable_dns);
 
+        let metrics_addr = args
+            .metrics_addr
+            .clone()
+            .or_else(|| cfg.metrics.addr.clone());
+
         Self {
             rpc_addr,
             p2p_addr,
@@ -192,6 +207,7 @@ impl Settings {
             rate_limit,
             seed_nodes,
             dns_seeds,
+            metrics_addr,
         }
     }
 }
@@ -989,6 +1005,21 @@ async fn main() {
     if args.mine {
         log::log_info(&format!("Mining enabled ({mining_threads} thread(s))"), ev);
     }
+
+    // Optional Prometheus metrics endpoint.  Off when --metrics-addr
+    // / [metrics] addr is unset; otherwise spawned alongside the
+    // PeerManager so /metrics reflects the live shared state.
+    let _metrics_handle = if let Some(addr) = args.metrics_addr.as_deref() {
+        metrics::spawn(
+            addr,
+            state.clone(),
+            mining_active.clone(),
+            mining_threads,
+            events_sender.clone(),
+        )
+    } else {
+        None
+    };
 
     // Clone so the TUI (spawned below) can still use `log_tx` after
     // the mining task takes ownership of its own clone.
