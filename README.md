@@ -247,6 +247,19 @@ CLI > config > hardcoded; lists are additive. Full operator playbook (running a 
 
 ---
 
+## Monitoring
+
+Pass `--metrics-addr <ip:port>` (or `[metrics] addr` in `bitaiir.toml`) to enable a Prometheus-compatible metrics endpoint:
+
+```bash
+./target/release/bitaiird --testnet --metrics-addr 127.0.0.1:8095
+curl http://127.0.0.1:8095/metrics
+```
+
+Emits gauges for chain height, peer counts (in/outbound), known peers, banned IPs, mempool size + bytes, pending spends, mining state + threads, and wallet lock state. **No wallet balances or addresses** are exposed. Disabled by default; the endpoint has no auth, so bind to localhost and reverse-proxy if you need external scraping.
+
+---
+
 ## Testnet faucet
 
 `bitaiir-faucet` is a small HTTP service that drips testnet AIIR to developer addresses. It does not hold keys — it talks to a local `bitaiird --testnet` over JSON-RPC and asks the daemon to `sendtoaddress`. The operator pre-funds the daemon by mining or by manual transfer.

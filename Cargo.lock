@@ -349,6 +349,7 @@ name = "bitaiir-daemon"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "axum",
  "base64 0.22.1",
  "bitaiir-chain",
  "bitaiir-crypto",
