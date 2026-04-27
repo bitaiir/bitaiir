@@ -138,24 +138,18 @@ DNS seeding is **optional** for early mainnet — Bitcoin shipped without
 it for years. But it's the resilience layer you want before the network
 grows past a handful of seed operators.
 
-### Status
+A native Rust `bitaiir-seeder` ships in the workspace — DNS server +
+crawler in one binary, reusing `bitaiir-net` for the wire protocol so
+it always speaks exactly what the daemon speaks.
 
-A native Rust `bitaiir-seeder` (DNS server + crawler in the same
-workspace, reusing `bitaiir-net` for the wire protocol) is on the
-roadmap. Until then, the practical choice is:
+Setup (build, DNS delegation, systemd unit, port-53 capabilities,
+tuning knobs, monitoring) is documented separately in
+[`seeder-operator-guide.md`](./seeder-operator-guide.md).
 
-- For mainnet launch and the first months: **Path A** is enough.
-  Five to ten static seeds with good uptime bootstrap the network
-  reliably.
-- Once `bitaiir-seeder` lands: anyone who controls a domain can run a
-  seeder and submit the hostname to `DNS_SEEDS_MAINNET`.
-
-If you want to roll your own seeder before then, the algorithm is
-simple — connect to known peers, run `getaddr`, follow the gossip
-graph, rank discovered peers by uptime ratio and recency, expose the
-top N as DNS records. The reference implementation for Bitcoin is
-[`sipa/bitcoin-seeder`](https://github.com/sipa/bitcoin-seeder); the
-shape applies, the wire protocol does not.
+For mainnet launch and the first months, **Path A** is still enough.
+Five to ten static seeds with good uptime bootstrap the network
+reliably. DNS seeders are the resilience layer you want once the
+network grows past a handful of static-IP operators.
 
 ---
 

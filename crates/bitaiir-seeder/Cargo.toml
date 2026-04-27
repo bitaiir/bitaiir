@@ -1,0 +1,48 @@
+[package]
+name = "bitaiir-seeder"
+description = "BitAiir DNS seeder (`bitaiir-seeder`) — crawls the P2P network and serves the top-ranked peers as authoritative DNS records."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bitaiir-seeder"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse the wire protocol so the seeder always speaks exactly what the
+# daemons speak (magic bytes, handshake, getaddr) — protocol-version
+# changes can't drift between the two.
+bitaiir-net = { workspace = true }
+bitaiir-types = { workspace = true }
+
+# Persistent peer-history database.  Same redb already used by the
+# daemon for blocks / UTXOs / known-peers — single-file, ACID, no
+# server.
+redb = { workspace = true }
+
+# DNS authoritative server.  Hickory is the modern Rust DNS stack
+# (formerly trust-dns); we use the `server` crate to expose UDP /
+# TCP listeners that answer A queries with the seeder's ranked
+# peer list.
+hickory-server = "0.24"
+hickory-proto = "0.24"
+
+# Hickory 0.24's RequestHandler trait uses #[async_trait]; pull it
+# in directly so we can implement the trait on our handler.
+async-trait = "0.1"
+
+# Async runtime + CLI parsing.
+clap = { workspace = true }
+tokio = { workspace = true }
+
+# Logging.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# Spawning real bitaiird in integration tests.
+tempfile = { workspace = true }
