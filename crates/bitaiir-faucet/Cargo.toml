@@ -12,6 +12,15 @@ repository.workspace = true
 name = "bitaiir-faucet"
 path = "src/main.rs"
 
+[dev-dependencies]
+# Spin up real bitaiird + bitaiir-faucet processes from the
+# integration test, talk to them over HTTP, and tear them down at
+# the end of each scenario.  `bitaiird` is located by deriving its
+# path from `CARGO_BIN_EXE_bitaiir-faucet` (both binaries land in
+# the same target dir).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = { workspace = true }
+
 [dependencies]
 # Address validation reuses the canonical Base58Check decoder.
 bitaiir-crypto = { workspace = true }
